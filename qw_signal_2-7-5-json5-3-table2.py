@@ -3813,6 +3813,14 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
 
 def render_task_table_row(t):
     """Render a single task row for the table. Takes task object 't' as parameter."""
+    # Extract and format display variables from task attributes
+    direction_display = t.signal_direction if t.signal_direction else '-'
+    signal_time_display = fmt_time_ui(t.signal_time) if t.signal_time else '-'
+    first_event_display = fmt_time_ui(t.first_event_time) if t.first_event_time else '-'
+    pin_display = "Yes" if t.first_event_is_pin else "No"
+    price_change_display = fmt_dd_ui(t.price_change_pct) if t.price_change_pct is not None else '-'
+    reached_display = "Yes" if t.reached_level else "No"
+    
     # Lock check
     reversed_display = "Yes" if t.reversed_direction else "No"
     hit_1_display = "Yes" if t.hit_1 else "No"
