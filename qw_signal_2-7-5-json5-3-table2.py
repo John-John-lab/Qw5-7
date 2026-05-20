@@ -3159,8 +3159,7 @@ def create_signal_tasks(n_clicks, signals, period_type, start_date, end_date, ho
         import threading
         threading.Thread(target=_run_parse_background, args=(parse_data,), daemon=True).start()
         
-        # 🔧 Return updated IDs immediately so UI can track new tasks
-        return new_ids, new_count
+        return f"🔄 Processing {total_signals} signals in background...", dash.no_update
     
     # 🔧 SMALL BATCH: Process synchronously (original logic with improved progress)
     return _process_signals_sync(signals, period_type, start_date, end_date, hours, tf, 
@@ -3261,14 +3260,6 @@ def _process_signals_sync(signals, period_type, start_date, end_date, hours, tf,
         print(f"🎯 [PARSE] {summary_msg}")
         if failed_details:
             print(f"⚠️ First 10 failures: {', '.join(failed_details[:10])}")
-    
-    # 🔧 CRITICAL FIX: Update golden store so UI table sees newly created tasks immediately
-    # This syncs tm.tasks (working storage) → golden_task_store_data (UI display source)
-    global golden_task_store_data, golden_store_version
-    with tm.lock:
-        golden_task_store_data = list(tm.tasks.values())
-        golden_store_version += 1  # Invalidate page caches to force refresh
-    print(f"🔄 [PARSE] Golden store updated: {len(golden_task_store_data)} tasks, version={golden_store_version}")
     
     return new_ids, new_count
 
@@ -3389,14 +3380,6 @@ def _run_parse_background(parse_data):
     
     # Update global RAM reference
     current_tasks = list(tm.tasks.values())
-    
-    # 🔧 CRITICAL FIX: Update golden store so UI table sees newly created tasks immediately (background thread)
-    # This syncs tm.tasks (working storage) → golden_task_store_data (UI display source)
-    global golden_task_store_data, golden_store_version
-    with tm.lock:
-        golden_task_store_data = list(tm.tasks.values())
-        golden_store_version += 1  # Invalidate page caches to force refresh
-    print(f"🔄 [PARSE THREAD] Golden store updated: {len(golden_task_store_data)} tasks, version={golden_store_version}")
     
     # Final summary
     summary_msg = f"✅ Parse complete: {processed_count} created, {failed_count} failed out of {total_signals} signals"
@@ -3830,14 +3813,6 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
 
 def render_task_table_row(t):
     """Render a single task row for the table. Takes task object 't' as parameter."""
-    # Extract and format display variables from task attributes
-    direction_display = t.signal_direction if t.signal_direction else '-'
-    signal_time_display = fmt_time_ui(t.signal_time) if t.signal_time else '-'
-    first_event_display = fmt_time_ui(t.first_event_time) if t.first_event_time else '-'
-    pin_display = "Yes" if t.first_event_is_pin else "No"
-    price_change_display = fmt_dd_ui(t.price_change_pct) if t.price_change_pct is not None else '-'
-    reached_display = "Yes" if t.reached_level else "No"
-    
     # Lock check
     reversed_display = "Yes" if t.reversed_direction else "No"
     hit_1_display = "Yes" if t.hit_1 else "No"
