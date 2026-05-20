@@ -3159,7 +3159,8 @@ def create_signal_tasks(n_clicks, signals, period_type, start_date, end_date, ho
         import threading
         threading.Thread(target=_run_parse_background, args=(parse_data,), daemon=True).start()
         
-        return f"🔄 Processing {total_signals} signals in background...", dash.no_update
+        # 🔧 Return updated IDs immediately so UI can track new tasks
+        return new_ids, new_count
     
     # 🔧 SMALL BATCH: Process synchronously (original logic with improved progress)
     return _process_signals_sync(signals, period_type, start_date, end_date, hours, tf, 
@@ -3260,6 +3261,14 @@ def _process_signals_sync(signals, period_type, start_date, end_date, hours, tf,
         print(f"🎯 [PARSE] {summary_msg}")
         if failed_details:
             print(f"⚠️ First 10 failures: {', '.join(failed_details[:10])}")
+    
+    # 🔧 CRITICAL FIX: Update golden store so UI table sees newly created tasks immediately
+    # This syncs tm.tasks (working storage) → golden_task_store_data (UI display source)
+    global golden_task_store_data, golden_store_version
+    with tm.lock:
+        golden_task_store_data = list(tm.tasks.values())
+        golden_store_version += 1  # Invalidate page caches to force refresh
+    print(f"🔄 [PARSE] Golden store updated: {len(golden_task_store_data)} tasks, version={golden_store_version}")
     
     return new_ids, new_count
 
@@ -3380,6 +3389,14 @@ def _run_parse_background(parse_data):
     
     # Update global RAM reference
     current_tasks = list(tm.tasks.values())
+    
+    # 🔧 CRITICAL FIX: Update golden store so UI table sees newly created tasks immediately (background thread)
+    # This syncs tm.tasks (working storage) → golden_task_store_data (UI display source)
+    global golden_task_store_data, golden_store_version
+    with tm.lock:
+        golden_task_store_data = list(tm.tasks.values())
+        golden_store_version += 1  # Invalidate page caches to force refresh
+    print(f"🔄 [PARSE THREAD] Golden store updated: {len(golden_task_store_data)} tasks, version={golden_store_version}")
     
     # Final summary
     summary_msg = f"✅ Parse complete: {processed_count} created, {failed_count} failed out of {total_signals} signals"
