@@ -1,6 +1,6 @@
 """
 Bybit Downloader – Two Tabs + Summary + Optimized Buffering (10k candles)
-with Database Verification Tool and Real‑time Integrity Checks. 
+with Database Verification Tool and Real‑time Integrity Checks.
 Now with signal‑based downloading, candle analysis, and per‑task interactive charts.
 """
 import os, json, time, threading, queue, uuid, shutil, glob, hashlib, re, functools, sys, bisect, math
@@ -16,92 +16,6 @@ from plotly.subplots import make_subplots
 from flask import send_file, request, jsonify
 import pyarrow.parquet as pq
 from strategies import detect_strategies
-from database import (
-    get_database_info, 
-    symbol_timeframe_path, 
-    VerificationManager, 
-    vm,
-    create_data_analysis_tab,
-    register_database_callbacks,
-    MARKET_DATA_DIR,
-    INTERVAL_MS,
-    DUCKDB_AVAILABLE
-)
-
-# =============================================================================
-# UI HELPER FUNCTIONS - Pure presentation logic (no calculations)
-# These functions format data for display only
-# =============================================================================
-
-def fmt_time_ui(ts):
-    """
-    ⚡ ULTRA-FAST timestamp formatting - NO pandas calls
-    Pure UI function: formats timestamps for table display
-    """
-    if ts is None: return "-"
-    try:
-        if isinstance(ts, (float, np.floating)) and pd.isna(ts): return "-"
-        if isinstance(ts, (datetime, pd.Timestamp)):
-            return ts.strftime("%Y-%m-%d %H:%M")
-        if isinstance(ts, str):
-            # ⚡ FAST PATH: Handle ISO-8601 strings directly (85x faster than pandas)
-            ts_clean = ts.strip()
-            if ts_clean.endswith('Z'):
-                ts_clean = ts_clean[:-1]
-            if 'T' in ts_clean:
-                # ISO format: 2024-01-15T10:30:45.123
-                if '.' in ts_clean:
-                    dt = datetime.strptime(ts_clean.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-                else:
-                    dt = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
-                return dt.strftime("%Y-%m-%d %H:%M")
-            # Try numeric string
-            try:
-                ts_num = float(ts_clean)
-                return datetime.fromtimestamp(ts_num / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-            except ValueError:
-                pass
-        # Numeric timestamp (milliseconds)
-        if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return "-"
-    # Fallback to pandas (slow path - should rarely happen)
-    try:
-        return pd.to_datetime(ts).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return "-"
-
-def fmt_dd_ui(val):
-    """
-    Format drawdown/adverse value as percentage
-    Pure UI function: formats numeric values for table display
-    """
-    if val is None: return "-"
-    if isinstance(val, (float, np.floating)) and pd.isna(val): return "-"
-    try:
-        return f"{float(val):.2f}%"
-    except Exception:
-        return "-"
-
-def get_adverse_range_ui(pct):
-    """
-    Categorize percentage into ranges for statistics display
-    Pure UI function: returns range category string
-    """
-    if pct is None or (isinstance(pct, float) and pd.isna(pct)):
-        return None
-    if 0 <= pct < 0.5: return "0-0.5%"
-    elif 0.5 <= pct < 1: return "0.5-1%"
-    elif 1 <= pct < 2: return "1-2%"
-    elif 2 <= pct < 3: return "2-3%"
-    elif 3 <= pct < 4: return "3-4%"
-    elif 4 <= pct < 5: return "4-5%"
-    elif 5 <= pct < 10: return "5-10%"
-    elif 10 <= pct < 20: return "10-20%"
-    elif 20 <= pct < 30: return "20-30%"
-    elif pct >= 30: return ">30%"
-    return None
 
 # 🔧 CRITICAL: Global aliases for thread-safe numpy/bisect access in background threads
 np_local_global = None
@@ -290,10 +204,17 @@ def _parse_timestamp(val):
 # END JSON PERSISTENCE LAYER
 # =============================================================================
 
-# DuckDB availability is now imported from database module
-# See: from database import DUCKDB_AVAILABLE
+# ---------- DuckDB (optional) ----------
+try:
+    import duckdb
+    DUCKDB_AVAILABLE = True
+except ImportError:
+    DUCKDB_AVAILABLE = False
+    print("DuckDB not installed. The DuckDB query button will not work. Install with: pip install duckdb")
 
 # ---------- Configuration ----------
+MARKET_DATA_DIR = "./market_data"
+os.makedirs(MARKET_DATA_DIR, exist_ok=True)
 LOGS_DIR = "./task_logs"
 os.makedirs(LOGS_DIR, exist_ok=True)
 BYBIT_BASE_URL = "https://api.bybit.com"
@@ -306,7 +227,11 @@ TIMEFRAMES = {
     "4 hours": "240", "1 day": "D", "1 week": "W"
 }
 # Millisecond durations for each interval (used for gap detection and range calculations)
-# INTERVAL_MS is now imported from database module
+INTERVAL_MS = {
+    "1": 60000, "3": 180000, "5": 300000, "10": 600000, "15": 900000,
+    "30": 1800000, "60": 3600000, "120": 7200000, "240": 14400000,
+    "D": 86400000, "W": 604800000
+}
 PRICE_CONTINUITY_TOLERANCE = 0.10
 # Pagination constant for task summary table
 PAGE_SIZE = 300
@@ -428,8 +353,9 @@ def clear_parquet_cache():
     _load_parquet_cached.cache_clear()
 
 # ---------- Database Helpers ----------
-# symbol_timeframe_path is now imported from database module
-# get_database_info is now imported from database module
+def symbol_timeframe_path(symbol, timeframe):
+    """Return the folder path for a given symbol and timeframe."""
+    return os.path.join(MARKET_DATA_DIR, symbol.replace("/", "_"), timeframe)
 
 def write_parquet_batch(symbol, timeframe, df, overwrite=False, task=None):
     """
@@ -469,7 +395,49 @@ def read_existing_range(symbol, timeframe):
     max_ts = int(df["timestamp"].astype(int).max())
     return min_ts, max_ts
 
-
+def get_database_info():
+    """
+    Walk the market_data folder and collect metadata about each Parquet file.
+    Safely skips corrupted files and prints their paths for manual cleanup.
+    """
+    details, total_size, symbols = [], 0, set()
+    corrupted_files = []
+    for root, _, files in os.walk(MARKET_DATA_DIR):
+        for f in files:
+            if f == "data.parquet":
+                fp = os.path.join(root, f)
+                rel = os.path.relpath(root, MARKET_DATA_DIR).split(os.sep)
+                if len(rel) == 2:
+                    sym, tf = rel
+                    symbols.add(sym)
+                try:
+                    total_size += os.path.getsize(fp)
+                    df = pd.read_parquet(fp)
+                    if not df.empty:
+                        start = df["timestamp"].min()
+                        end = df["timestamp"].max()
+                        details.append({
+                            "symbol": sym,
+                            "timeframe": tf,
+                            "start": pd.to_datetime(start, unit='ms'),
+                            "end": pd.to_datetime(end, unit='ms'),
+                            "candles": len(df),
+                            "size": os.path.getsize(fp)
+                        })
+                except Exception as e:
+                    corrupted_files.append(fp)
+                    print(f"⚠️ Skipping corrupted file: {fp} ({e})")
+                    
+    if corrupted_files:
+        print("\n" + "="*60)
+        print("⚠️ CORRUPTED PARQUET FILES DETECTED ⚠️")
+        print("These files will cause crashes. Delete them and re-download:")
+        for f in corrupted_files:
+            folder = os.path.dirname(f)
+            print(f"  🗑️ rm -rf '{folder}'")
+        print("="*60 + "\n")
+        
+    return {"size": total_size, "symbols": len(symbols), "details": details}
 
 # ---------- Real Bybit API with Exponential Backoff ----------
 def fetch_symbols():
@@ -2246,10 +2214,258 @@ tm = TaskManager()
 recalc_bg = {"running": False, "count": 0, "total": 0, "stop_flag": False, "trigger_val": 0}
 recalc_poller_enabled = False  # 🔧 Flag to control poller state
 
-# VerificationManager and vm instance are now imported from database module
-# See: from database import VerificationManager, vm
+# ---------- Verification Manager (Enhanced) ----------
+class VerificationManager:
+    """
+    Runs background threads to scan all Parquet files and report issues.
+    Two modes: basic (gaps, duplicates) and deep (adds alignment, OHLCV, data types, statistical outliers).
+    Also can generate a Merkle‑style integrity report.
+    """
+    def __init__(self):
+        self.thread = None
+        self.stop_event = threading.Event()
+        self.log_queue = queue.Queue()
+        self.running = False
+        self.all_logs = []
+        self.log_lock = threading.Lock()
 
+    def add_log(self, message):
+        with self.log_lock:
+            self.all_logs.append(message)
+            self.log_queue.put(message + "\n")
 
+    def start_verification(self, deep=False):
+        if self.running:
+            self.add_log("Verification already running.")
+            return
+        self.stop_event.clear()
+        self.running = True
+        with self.log_lock:
+            self.all_logs = []
+        if deep:
+            self.thread = threading.Thread(target=self._run_deep_verification, daemon=True)
+            self.add_log("▶️ Deep verification started – checking all files with advanced statistics.")
+        else:
+            self.thread = threading.Thread(target=self._run_verification, daemon=True)
+            self.add_log("▶️ Basic verification started.")
+        self.thread.start()
+        print("Verification thread started.")
+
+    def stop_verification(self):
+        self.stop_event.set()
+        self.add_log("⏹️ Stop signal sent. Waiting for thread to finish...")
+
+    def generate_integrity_report(self):
+        report = {}
+        all_hashes = []
+        for root, dirs, files in os.walk(MARKET_DATA_DIR):
+            for file in files:
+                if file == "data.parquet":
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, MARKET_DATA_DIR)
+                    sha = hashlib.sha256()
+                    with open(full_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(65536), b""):
+                            sha.update(chunk)
+                    file_hash = sha.hexdigest()
+                    report[rel_path] = file_hash
+                    all_hashes.append(file_hash)
+        all_hashes.sort()
+        combined = "".join(all_hashes).encode()
+        root_hash = hashlib.sha256(combined).hexdigest()
+        report["_root"] = root_hash
+        return report
+
+    def _run_verification(self):
+        try:
+            self.add_log("Verification started.")
+            total_files = 0
+            for root, dirs, files in os.walk(MARKET_DATA_DIR):
+                for file in files:
+                    if file == "data.parquet":
+                        total_files += 1
+            self.add_log(f"Found {total_files} Parquet files to check.\n")
+            processed = 0
+            for root, dirs, files in os.walk(MARKET_DATA_DIR):
+                if self.stop_event.is_set():
+                    self.add_log("Verification stopped by user.")
+                    return
+                for file in files:
+                    if file == "data.parquet":
+                        processed += 1
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, MARKET_DATA_DIR)
+                        parts = rel_path.split(os.sep)
+                        if len(parts) != 3:
+                            self.add_log(f"  Skipping unexpected path: {rel_path}")
+                            continue
+                        symbol, timeframe, _ = parts
+                        self.add_log(f"\n[{processed}/{total_files}] Checking {symbol} ({timeframe})...")
+                        try:
+                            df = pd.read_parquet(full_path)
+                            count = len(df)
+                            if count == 0:
+                                self.add_log("  File empty.")
+                                continue
+                            min_ts = df["timestamp"].min()
+                            max_ts = df["timestamp"].max()
+                            self.add_log(f"  Candles: {count}")
+                            self.add_log(f"  Range: {pd.to_datetime(min_ts, unit='ms')} to {pd.to_datetime(max_ts, unit='ms')}")
+                            dups = df["timestamp"].duplicated().sum()
+                            if dups:
+                                self.add_log(f"  ⚠ Duplicates: {dups}")
+                            else:
+                                self.add_log(f"  ✓ No duplicates")
+                            interval_ms = INTERVAL_MS.get(timeframe, 60000)
+                            if len(df) > 1:
+                                diffs = df["timestamp"].diff().iloc[1:].astype('int64')
+                                threshold_ns = interval_ms * 1_000_000 * 1.5
+                                gaps = diffs[diffs > threshold_ns]
+                                if not gaps.empty:
+                                    self.add_log(f"  ⚠ Gaps: {len(gaps)} detected")
+                                    for i, gap in enumerate(gaps.head(5)):
+                                        self.add_log(f"    Gap {i+1}: {gap/1e6:.1f} ms ({gap/60000:.1f} minutes)")
+                                    if len(gaps) > 5:
+                                        self.add_log(f"    ... and {len(gaps)-5} more")
+                                else:
+                                    self.add_log(f"  ✓ No significant gaps")
+                            if not df["timestamp"].is_monotonic_increasing:
+                                self.add_log(f"  ⚠ Timestamps not sorted!")
+                            self.add_log(f"  ✓ OK")
+                        except Exception as e:
+                            self.add_log(f"  ✗ ERROR: {str(e)}")
+            self.add_log("\nVerification completed.")
+        except Exception as e:
+            self.add_log(f"Verification thread error: {str(e)}")
+        finally:
+            self.running = False
+            print("Verification thread finished.")
+
+    def _run_deep_verification(self):
+        try:
+            self.add_log("Deep verification started.")
+            total_files = 0
+            for root, dirs, files in os.walk(MARKET_DATA_DIR):
+                for file in files:
+                    if file == "data.parquet":
+                        total_files += 1
+            self.add_log(f"Found {total_files} Parquet files to check.\n")
+            processed = 0
+            for root, dirs, files in os.walk(MARKET_DATA_DIR):
+                if self.stop_event.is_set():
+                    self.add_log("Deep verification stopped by user.")
+                    return
+                for file in files:
+                    if file == "data.parquet":
+                        processed += 1
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, MARKET_DATA_DIR)
+                        parts = rel_path.split(os.sep)
+                        if len(parts) != 3:
+                            self.add_log(f"  Skipping unexpected path: {rel_path}")
+                            continue
+                        symbol, timeframe, _ = parts
+                        self.add_log(f"\n[{processed}/{total_files}] DEEP CHECK: {symbol} ({timeframe})...")
+                        try:
+                            try:
+                                meta = pq.read_metadata(full_path)
+                                self.add_log(f"  Parquet: {meta.num_rows} rows, {meta.num_columns} cols")
+                            except Exception as e:
+                                self.add_log(f"  ✗ Parquet metadata error: {e}")
+                            df = pd.read_parquet(full_path)
+                            count = len(df)
+                            if count == 0:
+                                self.add_log("  File empty.")
+                                continue
+                            min_ts = df["timestamp"].min()
+                            max_ts = df["timestamp"].max()
+                            self.add_log(f"  Candles: {count}")
+                            self.add_log(f"  Range: {pd.to_datetime(min_ts, unit='ms')} to {pd.to_datetime(max_ts, unit='ms')}")
+                            dups = df["timestamp"].duplicated().sum()
+                            if dups:
+                                self.add_log(f"  ⚠ Duplicates: {dups}")
+                            else:
+                                self.add_log(f"  ✓ No duplicates")
+                            interval_ms = INTERVAL_MS.get(timeframe, 60000)
+                            if len(df) > 1:
+                                diffs = df["timestamp"].diff().iloc[1:].astype('int64')
+                                threshold_ns = interval_ms * 1_000_000 * 1.5
+                                gaps = diffs[diffs > threshold_ns]
+                                if not gaps.empty:
+                                    self.add_log(f"  ⚠ Gaps: {len(gaps)} detected")
+                                    for i, gap in enumerate(gaps.head(5)):
+                                        self.add_log(f"    Gap {i+1}: {gap/1e6:.1f} ms ({gap/60000:.1f} minutes)")
+                                    if len(gaps) > 5:
+                                        self.add_log(f"    ... and {len(gaps)-5} more")
+                                else:
+                                    self.add_log(f"  ✓ No significant gaps")
+                            aligned = df["timestamp"] % interval_ms == 0
+                            if not aligned.all():
+                                bad_count = (~aligned).sum()
+                                self.add_log(f"  ⚠ {bad_count} timestamps not aligned to {interval_ms}ms interval!")
+                            else:
+                                self.add_log(f"  ✓ All timestamps aligned")
+                            invalid = df[
+                                (df['high'] < df['low']) |
+                                (df['high'] < df['open']) |
+                                (df['high'] < df['close']) |
+                                (df['low'] > df['open']) |
+                                (df['low'] > df['close']) |
+                                (df['volume'] < 0)
+                            ]
+                            if not invalid.empty:
+                                self.add_log(f"  ⚠ {len(invalid)} candles with OHLCV inconsistency!")
+                                for idx, row in invalid.head(3).iterrows():
+                                    self.add_log(f"    {row['timestamp']}: H={row['high']:.2f}, L={row['low']:.2f}, O={row['open']:.2f}, C={row['close']:.2f}")
+                            else:
+                                self.add_log(f"  ✓ OHLCV consistent")
+                            expected_types = {'float64', 'int64'}
+                            type_issues = False
+                            for col in ['open', 'high', 'low', 'close', 'volume']:
+                                if col in df.columns and df[col].dtype not in expected_types:
+                                    self.add_log(f"  ⚠ Column '{col}' has unexpected type {df[col].dtype}")
+                                    type_issues = True
+                            if not type_issues:
+                                self.add_log(f"  ✓ Data types OK")
+                            nan_cols = df.columns[df.isna().any()].tolist()
+                            if nan_cols:
+                                self.add_log(f"  ⚠ NaN values found in columns: {nan_cols}")
+                            else:
+                                self.add_log(f"  ✓ No NaN values")
+                            zero_vol = (df['volume'] == 0).sum()
+                            if zero_vol > 0:
+                                self.add_log(f"  ℹ {zero_vol} candles have zero volume")
+                            returns = df['close'].pct_change().fillna(0)
+                            mean_ret = returns.mean()
+                            std_ret = returns.std()
+                            outliers = returns[abs(returns - mean_ret) > 5 * std_ret]
+                            if len(outliers) > 0:
+                                self.add_log(f"  ⚠ {len(outliers)} candles with extreme price movements (potential errors)")
+                            if len(df) > 20:
+                                vol_mean = df['volume'].rolling(20).mean()
+                                vol_std = df['volume'].rolling(20).std()
+                                volume_spikes = df[(df['volume'] > vol_mean + 3 * vol_std) & (vol_std > 0)]
+                                if len(volume_spikes) > 0:
+                                    self.add_log(f"  ℹ {len(volume_spikes)} volume spikes detected")
+                                zero_streaks = (df['volume'] == 0).astype(int).groupby(df['volume'].ne(0).cumsum()).sum()
+                                long_streaks = zero_streaks[zero_streaks > 10]
+                                if not long_streaks.empty:
+                                    self.add_log(f"  ⚠ {len(long_streaks)} periods of extended zero volume (>10 candles)")
+                            self.add_log(f"  ✓ Deep check passed")
+                        except Exception as e:
+                            self.add_log(f"  ✗ ERROR: {str(e)}")
+            self.add_log("\nDeep verification completed.")
+        except Exception as e:
+            self.add_log(f"Deep verification thread error: {str(e)}")
+        finally:
+            self.running = False
+            print("Deep verification thread finished.")
+
+    def get_logs(self):
+        with self.log_lock:
+            return "\n".join(self.all_logs)
+
+vm = VerificationManager()
 
 ## ---------- Background Optimizer Manager (Low-Spec Safe) ----------
 class OptimizerManager:
@@ -3031,8 +3247,103 @@ def render_tab(tab):
             html.Div(id="summary-stats-container", style={"max-height": "400px", "overflow-y": "auto", "border": "1px solid #aaa", "padding": "10px"}),
         ])
     else:
-        # Data Analysis tab - now imported from database module
-        return create_data_analysis_tab()
+        # Data Analysis tab (unchanged)
+        info = get_database_info()
+        total_candles = sum(d["candles"] for d in info["details"])
+        total_size_mb = info["size"] / 1e6
+        total_symbols = info["symbols"]
+        rows = []
+        for d in info["details"]:
+            rows.append(html.Tr([
+                html.Td(d["symbol"]),
+                html.Td(d["timeframe"]),
+                html.Td(d["start"].strftime("%Y-%m-%d %H:%M")),
+                html.Td(d["end"].strftime("%Y-%m-%d %H:%M")),
+                html.Td(f"{d['candles']:,}"),
+                html.Td(f"{d['size']/1e6:.2f} MB")
+            ]))
+        table = html.Table([
+            html.Thead(html.Tr([html.Th("Symbol"), html.Th("TF"), html.Th("Start"), html.Th("End"), html.Th("Candles"), html.Th("Size")])),
+            html.Tbody(rows)
+        ], style={"width": "100%", "border": "1px solid black", "borderCollapse": "collapse"})
+        if info["details"]:
+            df = pd.DataFrame(info["details"])
+            df_grouped = df.groupby("symbol")["candles"].sum().reset_index()
+            fig = px.bar(df_grouped, x="symbol", y="candles", title="Total Candles per Symbol")
+        else:
+            fig = px.bar(title="No data downloaded yet")
+        return html.Div([
+            html.H3("Data Statistics"),
+            html.P(f"Total symbols: {total_symbols}"),
+            html.P(f"Total candles: {total_candles:,}"),
+            html.P(f"Total database size: {total_size_mb:.2f} MB"),
+            html.Button("Download Backup", id="download-db-btn"),
+            dcc.Download(id="download-db"),
+            html.H4("Detailed Table"),
+            table,
+            html.H4("Candles per Symbol"),
+            dcc.Graph(figure=fig),
+            html.Hr(),
+            html.H4("Database Structure"),
+            dcc.Markdown("""
+- **Root folder**: `market_data/`
+- **Symbol folders**: e.g., `BTCUSDT/`, `ETHUSDT/` (slashes in symbol names replaced with `_`)
+- **Timeframe subfolders**: e.g., `1/`, `5/`, `60/`, `D/`, `W/` (matching Bybit interval codes)
+- **Data files**: each timeframe folder contains a single `data.parquet` file
+- **Schema**:
+  - `timestamp` (int64): Unix timestamp in milliseconds (UTC)
+  - `open`, `high`, `low`, `close` (float64): OHLC prices
+  - `volume` (float64): trading volume
+- **Compression**: ZSTD (via PyArrow)
+"""),
+            html.Hr(),
+            html.H4("Database Verification"),
+            html.Div([
+                html.Button("Start Basic Verification", id="start-verify-btn", n_clicks=0),
+                html.Button("Start Deep Verification", id="start-deep-verify-btn", n_clicks=0),
+                html.Button("Stop Verification", id="stop-verify-btn", n_clicks=0),
+                html.Br(),
+                html.Button("Generate Integrity Report", id="generate-report-btn", n_clicks=0),
+                dcc.Download(id="download-report"),
+                html.Pre(id="verify-log", style={"height": "300px", "overflow-y": "scroll", "border": "1px solid #ccc", "padding": "5px", "marginTop": "10px"}),
+                html.Br(),
+                html.Button("Run DuckDB Query (Unified View)", id="run-duckdb-btn", n_clicks=0),
+                html.Pre(id="duckdb-result", style={"height": "200px", "overflow-y": "scroll", "border": "1px solid #ccc", "padding": "5px", "marginTop": "10px"}),
+                html.Br(),
+                html.H4("TradingView‑Style Chart"),
+                html.Div([
+                    dcc.Dropdown(
+                        id="chart-symbol-dropdown",
+                        placeholder="Select Symbol",
+                        options=[{"label": s, "value": s} for s in sorted(set(d["symbol"] for d in info["details"]))] if info["details"] else [],
+                        value=None
+                    ),
+                    dcc.Dropdown(
+                        id="chart-timeframe-dropdown",
+                        placeholder="Select Timeframe",
+                        options=[],
+                        value=None
+                    ),
+                    dcc.Graph(id="candlestick-chart", style={"height": "600px"}),
+                    html.Hr(),
+                    html.H4("Database Maintenance", style={"marginTop": "20px"}),
+                    html.Div([
+                        html.Label("Symbol:"),
+                        dcc.Dropdown(id="clean-symbol", placeholder="Select symbol", style={"width": "200px", "display": "inline-block", "marginRight": "10px"}),
+                        html.Label("Timeframe:", style={"marginLeft": "10px"}),
+                        dcc.Dropdown(id="clean-timeframe", placeholder="Select timeframe", style={"width": "150px", "display": "inline-block", "marginRight": "10px"}),
+                        html.Button("🗑️ Delete selected data", id="delete-selected-btn", style={"margin": "5px", "backgroundColor": "#ffcccc"}),
+                        html.Button("🔄 Re-download full history", id="redownload-full-btn", style={"margin": "5px", "backgroundColor": "#ccffcc"}),
+                        html.Br(),
+                        dcc.Checklist(id="confirm-delete-all", options=[{"label": "I understand, delete ALL market data (cannot undo)", "value": "confirm"}], value=[]),
+                        html.Button("⚠️ Delete ALL market data", id="delete-all-btn", style={"margin": "5px", "backgroundColor": "#ff9999"}, disabled=True),
+                        html.Div(id="delete-status", style={"marginTop": "10px", "color": "red", "fontWeight": "bold"}),
+                        html.Button("🔄 Re-download ALL Existing Data", id="redownload-all-btn", style={"margin": "5px", "backgroundColor": "#ccffcc"}),
+                        html.Div(id="redownload-all-status", style={"marginTop": "10px", "color": "blue", "fontSize": "13px"}),
+                    ]),
+                ])
+            ])
+        ])
 
 # ----- Callbacks for signal file handling -----
 @app.callback(
@@ -3159,8 +3470,7 @@ def create_signal_tasks(n_clicks, signals, period_type, start_date, end_date, ho
         import threading
         threading.Thread(target=_run_parse_background, args=(parse_data,), daemon=True).start()
         
-        # 🔧 Return updated IDs immediately so UI can track new tasks
-        return new_ids, new_count
+        return f"🔄 Processing {total_signals} signals in background...", dash.no_update
     
     # 🔧 SMALL BATCH: Process synchronously (original logic with improved progress)
     return _process_signals_sync(signals, period_type, start_date, end_date, hours, tf, 
@@ -3261,14 +3571,6 @@ def _process_signals_sync(signals, period_type, start_date, end_date, hours, tf,
         print(f"🎯 [PARSE] {summary_msg}")
         if failed_details:
             print(f"⚠️ First 10 failures: {', '.join(failed_details[:10])}")
-    
-    # 🔧 CRITICAL FIX: Update golden store so UI table sees newly created tasks immediately
-    # This syncs tm.tasks (working storage) → golden_task_store_data (UI display source)
-    global golden_task_store_data, golden_store_version
-    with tm.lock:
-        golden_task_store_data = list(tm.tasks.values())
-        golden_store_version += 1  # Invalidate page caches to force refresh
-    print(f"🔄 [PARSE] Golden store updated: {len(golden_task_store_data)} tasks, version={golden_store_version}")
     
     return new_ids, new_count
 
@@ -3389,14 +3691,6 @@ def _run_parse_background(parse_data):
     
     # Update global RAM reference
     current_tasks = list(tm.tasks.values())
-    
-    # 🔧 CRITICAL FIX: Update golden store so UI table sees newly created tasks immediately (background thread)
-    # This syncs tm.tasks (working storage) → golden_task_store_data (UI display source)
-    global golden_task_store_data, golden_store_version
-    with tm.lock:
-        golden_task_store_data = list(tm.tasks.values())
-        golden_store_version += 1  # Invalidate page caches to force refresh
-    print(f"🔄 [PARSE THREAD] Golden store updated: {len(golden_task_store_data)} tasks, version={golden_store_version}")
     
     # Final summary
     summary_msg = f"✅ Parse complete: {processed_count} created, {failed_count} failed out of {total_signals} signals"
@@ -3565,7 +3859,7 @@ def update_summary_stats_only(version, lock_state):
         return f"{stat_count} / {total} ({(stat_count/total)*100:.1f}%)"
 
     # ----- Max Adverse Distribution Stats -----
-    def get_adverse_range_ui(pct):
+    def get_adverse_range(pct):
         if pct is None or (isinstance(pct, float) and pd.isna(pct)):
             return None
         if 0 <= pct < 0.5: return "0-0.5%"
@@ -3584,7 +3878,7 @@ def update_summary_stats_only(version, lock_state):
     for t in tasks:
         adv = getattr(t, 'max_adverse_move_pct', None)
         if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-            range_key = get_adverse_range_ui(adv)
+            range_key = get_adverse_range(adv)
             if range_key:
                 adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
 
@@ -3608,7 +3902,7 @@ def update_summary_stats_only(version, lock_state):
     for t in tasks:
         exp = getattr(t, 'max_expected_move_pct', None)
         if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
-            range_key = get_adverse_range_ui(exp)
+            range_key = get_adverse_range(exp)
             if range_key:
                 exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
             if exp >= 0.5:
@@ -3626,13 +3920,13 @@ def update_summary_stats_only(version, lock_state):
     for t in tasks:
         adv_s = getattr(t, 'max_adverse_sgnl_pct', None)
         if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
-            r = get_adverse_range_ui(adv_s)
+            r = get_adverse_range(adv_s)
             if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
             if adv_s >= 0.5: adv_sgnl_05 += 1
             if adv_s >= 4.0: adv_sgnl_4 += 1
         exp_s = getattr(t, 'max_expected_sgnl_pct', None)
         if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
-            r = get_adverse_range_ui(exp_s)
+            r = get_adverse_range(exp_s)
             if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
             if exp_s >= 0.5: exp_sgnl_05 += 1
             if exp_s >= 4.0: exp_sgnl_4 += 1
@@ -3649,7 +3943,7 @@ def update_summary_stats_only(version, lock_state):
         dp = getattr(t, 'price_change_pct', None)
         if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
             val = abs(dp)
-            r = get_adverse_range_ui(val)
+            r = get_adverse_range(val)
             if r:
                 delta_counts[r] += 1
             if val >= 0.5: delta_05_plus_total += 1
@@ -4355,795 +4649,6 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     print(f"[TRACE] <<< COMPLETE Page {current_page} rendered in {timer.last_time - timer.start_time:.4f}s | Cache Size: {len(_page_html_cache)}")
     print(f"[TRACE] ✓✓✓ RETURNING RESULT TO DASH UI ✓✓✓")
     
-
-    return result
-
-def render_task_table_row(t):
-    """Render a single task row for the table. Takes task object 't' as parameter."""
-    # Extract and format display variables from task attributes
-    direction_display = t.signal_direction if t.signal_direction else '-'
-    signal_time_display = fmt_time_ui(t.signal_time) if t.signal_time else '-'
-    first_event_display = fmt_time_ui(t.first_event_time) if t.first_event_time else '-'
-    pin_display = "Yes" if t.first_event_is_pin else "No"
-    price_change_display = fmt_dd_ui(t.price_change_pct) if t.price_change_pct is not None else '-'
-    reached_display = "Yes" if t.reached_level else "No"
-    
-    # Lock check
-    reversed_display = "Yes" if t.reversed_direction else "No"
-    hit_1_display = "Yes" if t.hit_1 else "No"
-    hit_1_5_display = "Yes" if t.hit_1_5 else "No"
-    hit_2_display = "Yes" if t.hit_2 else "No"
-    
-    strategy_display = t.strategy_log_summary if t.strategy_log_summary else '-'
-    strategy_conf = t.strategy_confidence if t.strategy_confidence else 0
-    confidence_display = f"{strategy_conf:.1f}%" if strategy_conf else "-"
-    
-    # Count impulses
-    impulse_count = sum(1 for sig in t.strategy_signals if sig.get('type') == 'impulse')
-    impulse_display = str(impulse_count)
-    
-    # Format log display based on hide_logs setting
-    if t.hide_logs:
-        log_display = html.Span("Logs are hidden", style={"color": "#888", "fontStyle": "italic", "fontSize": "12px"})
-    else:
-        log_text = "\n".join(t.log) if t.log else "No logs yet..."
-        log_display = html.Div(
-            log_text,
-            style={
-                "width": "100%", 
-                "maxHeight": "100px", 
-                "minHeight": "50px",
-                "fontFamily": "monospace", 
-                "fontSize": "11px", 
-                "overflowY": "auto",
-                "whiteSpace": "pre-wrap",
-                "wordWrap": "break-word",
-                "padding": "4px",
-                "border": "1px solid #ddd",
-                "borderRadius": "3px",
-                "backgroundColor": "#fafafa"
-            }
-        )
-        
-    # Build action buttons
-    task_id_str = str(t.task_id)
-    is_completed = t.status == "completed"
-    btn_disabled = "not-allowed" if not is_completed else "pointer"
-    btn_opacity = "0.6" if not is_completed else "1"
-    
-    stop_btn = html.Div("Stop", id=f"btn-stop-{task_id_str}",
-        **{"data-action": "stop", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#ffcccc", 
-               "borderRadius": "3px", "cursor": "pointer", "display": "inline-block", "fontSize": "11px"},
-        className="interactive-button")
-    
-    pause_label = "Resume" if t.paused else "Pause"
-    pause_bg = "#fff3cd" if t.paused else "#d1ecf1"
-    pause_btn = html.Div(pause_label, id=f"btn-pause-{task_id_str}",
-        **{"data-action": "pause", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "4px 8px", "backgroundColor": pause_bg, 
-               "borderRadius": "3px", "cursor": "pointer", "display": "inline-block", "fontSize": "11px"},
-        className="interactive-button")
-    
-    chart_btn = html.Div("Chart", id=f"btn-chart-{task_id_str}",
-        **{"data-action": "chart", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
-               "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
-               "fontSize": "11px", "opacity": btn_opacity},
-        className="interactive-button")
-    
-    details_btn = html.Div("Details", id=f"btn-details-{task_id_str}",
-        **{"data-action": "details", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
-               "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
-               "fontSize": "11px", "opacity": btn_opacity},
-        className="interactive-button")
-    
-    impulse_has_data = is_completed and impulse_count > 0
-    impulse_btn = html.Div("Impulse", id=f"btn-impulse-{task_id_str}",
-        **{"data-action": "impulse", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#d4edda" if impulse_has_data else "#e9ecef", 
-               "borderRadius": "3px", "cursor": "pointer" if impulse_has_data else "not-allowed", 
-               "display": "inline-block", "fontSize": "11px", 
-               "opacity": "1" if impulse_has_data else "0.6"},
-        className="interactive-button")
-    
-    rerun_strat_btn = html.Div("Re‑run Strategy", id=f"btn-rerun-strat-{task_id_str}",
-        **{"data-action": "rerun-strat", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "3px 6px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
-               "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
-               "fontSize": "9px", "opacity": btn_opacity},
-        className="interactive-button")
-    
-    rerun_impulse_btn = html.Div("Re‑run Impulse", id=f"btn-rerun-impulse-{task_id_str}",
-        **{"data-action": "rerun-impulse", "data-task-id": task_id_str},
-        style={"margin": "2px", "padding": "3px 6px", "backgroundColor": "#d4edda" if is_completed else "#e9ecef", 
-               "borderRadius": "3px", "cursor": btn_disabled, "display": "inline-block", 
-               "fontSize": "9px", "opacity": btn_opacity},
-        className="interactive-button")
-    
-    # TV Button
-    symbol = t.symbols[0] if t.symbols else ""
-    tv_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{symbol}&interval={t.timeframe}"
-    tv_btn = html.A(
-        html.Div("TV", style={"margin": "2px", "padding": "4px 8px", "backgroundColor": "#e7f3ff", 
-                              "borderRadius": "3px", "cursor": "pointer", "display": "inline-block", "fontSize": "11px"}),
-        href=tv_url, target="_blank", title="Open TradingView Chart"
-    )
-
-    button_cell = html.Div([stop_btn, pause_btn, chart_btn, details_btn, impulse_btn, rerun_strat_btn, rerun_impulse_btn, tv_btn])
-
-    # Build and return table row
-    return html.Tr([
-        html.Td(task_id_str[:8], style={"minWidth": "80px"}),
-        html.Td(t.status, style={"minWidth": "80px"}),
-        html.Td(f"{t.progress:.1f}%", style={"minWidth": "70px"}),
-        html.Td(", ".join(t.symbols), style={"minWidth": "100px"}),
-        html.Td(t.mode, style={"minWidth": "70px"}),
-        html.Td(direction_display, style={"minWidth": "80px"}),
-        html.Td(signal_time_display, style={"minWidth": "120px"}),
-        html.Td(first_event_display, style={"minWidth": "120px"}),
-        html.Td(pin_display, style={"minWidth": "60px"}),
-        html.Td(price_change_display, style={"minWidth": "80px"}),
-        html.Td(reached_display, style={"minWidth": "70px"}),
-        html.Td(reversed_display, style={"minWidth": "70px"}),
-        html.Td(hit_1_display, style={"minWidth": "50px"}),
-        html.Td(hit_1_5_display, style={"minWidth": "60px"}),
-        html.Td(hit_2_display, style={"minWidth": "50px"}),
-        html.Td("Yes" if t.first_hit_1_expected else "No", style={"minWidth": "50px"}),
-        html.Td(fmt_time_ui(t.first_hit_1_expected_time), style={"minWidth": "140px"}),
-        html.Td("Yes" if t.first_hit_1_5_expected else "No", style={"minWidth": "60px"}),
-        html.Td(fmt_time_ui(t.first_hit_1_5_expected_time), style={"minWidth": "140px"}),
-        html.Td("Yes" if t.first_hit_2_expected else "No", style={"minWidth": "50px"}),
-        html.Td(fmt_time_ui(t.first_hit_2_expected_time), style={"minWidth": "140px"}),
-        html.Td("Yes" if t.first_hit_1_opposite else "No", style={"minWidth": "50px"}),
-        html.Td(fmt_time_ui(t.first_hit_1_opposite_time), style={"minWidth": "140px"}),
-        html.Td("Yes" if t.first_hit_1_5_opposite else "No", style={"minWidth": "60px"}),
-        html.Td(fmt_time_ui(t.first_hit_1_5_opposite_time), style={"minWidth": "140px"}),
-        html.Td("Yes" if t.first_hit_2_opposite else "No", style={"minWidth": "50px"}),
-        html.Td(fmt_time_ui(t.first_hit_2_opposite_time), style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.max_adverse_move_pct), style={"minWidth": "100px"}, className="strike-through" if not t.reached_level else ""),
-        html.Td(fmt_time_ui(t.max_adverse_time), style={"minWidth": "140px"}, className="strike-through" if not t.reached_level else ""),
-        html.Td(fmt_dd_ui(t.max_expected_move_pct), style={"minWidth": "100px"}, className="strike-through" if not t.reached_level else ""),
-        html.Td(fmt_time_ui(t.max_expected_time), style={"minWidth": "140px"}, className="strike-through" if not t.reached_level else ""),
-        html.Td("Not returned" if not t.returned_to_signal else fmt_dd_ui(t.max_adverse_before_return_pct), style={"minWidth": "140px"}),
-        html.Td(fmt_time_ui(t.max_adverse_before_return_time) if t.returned_to_signal else "-", style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.max_adverse_sgnl_pct), style={"minWidth": "100px"}),
-        html.Td(fmt_time_ui(t.max_adverse_sgnl_time), style={"minWidth": "140px"}),
-        html.Td("Not returned" if not t.returned_to_sgnl else fmt_dd_ui(t.max_adverse_before_return_sgnl_pct), style={"minWidth": "140px"}),
-        html.Td(fmt_time_ui(t.max_adverse_before_return_sgnl_time) if t.returned_to_sgnl else "-", style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.max_expected_sgnl_pct), style={"minWidth": "100px"}),
-        html.Td(fmt_time_ui(t.max_expected_sgnl_time), style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.drawdown_before_level), style={"minWidth": "80px"}),
-        html.Td(fmt_time_ui(t.drawdown_before_level_time), style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.drawdown_before_1pct), style={"minWidth": "80px"}),
-        html.Td(fmt_time_ui(t.drawdown_before_1pct_time), style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.drawdown_before_1_5pct), style={"minWidth": "80px"}),
-        html.Td(fmt_time_ui(t.drawdown_before_1_5pct_time), style={"minWidth": "140px"}),
-        html.Td(fmt_dd_ui(t.drawdown_before_2pct), style={"minWidth": "80px"}),
-        html.Td(fmt_time_ui(t.drawdown_before_2pct_time), style={"minWidth": "140px"}),
-        html.Td(strategy_display, style={"minWidth": "120px"}),
-        html.Td(confidence_display, style={"minWidth": "80px"}),
-        html.Td(impulse_display, style={"minWidth": "80px"}),
-        html.Td(log_display, style={"minWidth": "200px"}),
-        html.Td(button_cell, style={"minWidth": "180px"})
-    ])
-
-
-def render_task_table_header():
-    """
-    Render the table header with all column titles.
-    Output: html.Thead component with sticky positioning
-    """
-    return html.Thead(html.Tr([
-        html.Th("ID", style={"minWidth": "80px"}),
-        html.Th("Status", style={"minWidth": "80px"}),
-        html.Th("Progress", style={"minWidth": "70px"}),
-        html.Th("Symbols", style={"minWidth": "100px"}),
-        html.Th("Mode", style={"minWidth": "70px"}),
-        html.Th("Direction", style={"minWidth": "80px"}),
-        html.Th("Signal Time", style={"minWidth": "120px"}),
-        html.Th("First Event", style={"minWidth": "120px"}),
-        html.Th("Pin?", style={"minWidth": "60px"}),
-        html.Th("Price Δ% (sgnl-lvl)", style={"minWidth": "80px"}),
-        html.Th("Reached", style={"minWidth": "70px"}),
-        html.Th("Reversed", style={"minWidth": "70px"}),
-        html.Th("Hit 1% (lvl-fwd.dir)", style={"minWidth": "50px"}),
-        html.Th("Hit 1.5% (lvl-fwd.dir)", style={"minWidth": "60px"}),
-        html.Th("Hit 2% (lvl-fwd.dir)", style={"minWidth": "50px"}),
-        html.Th("1st 1% Exp", style={"minWidth": "50px"}),
-        html.Th("Time 1% Exp", style={"minWidth": "140px"}),
-        html.Th("1st 1.5% Exp", style={"minWidth": "60px"}),
-        html.Th("Time 1.5% Exp", style={"minWidth": "140px"}),
-        html.Th("1st 2% Exp", style={"minWidth": "50px"}),
-        html.Th("Time 2% Exp", style={"minWidth": "140px"}),
-        html.Th("1st 1% Opp", style={"minWidth": "50px"}),
-        html.Th("Time 1% Opp", style={"minWidth": "140px"}),
-        html.Th("1st 1.5% Opp", style={"minWidth": "60px"}),
-        html.Th("Time 1.5% Opp", style={"minWidth": "140px"}),
-        html.Th("1st 2% Opp", style={"minWidth": "50px"}),
-        html.Th("Time 2% Opp", style={"minWidth": "140px"}),
-        html.Th("Max Adv %(lvl)", style={"minWidth": "100px"}),
-        html.Th("Max Adv T(lvl)", style={"minWidth": "140px"}),
-        html.Th("Max Exp %(lvl)", style={"minWidth": "100px"}),
-        html.Th("Max Exp T(lvl)", style={"minWidth": "140px"}),
-        html.Th("Max Adv %(sgnl)", style={"minWidth": "100px"}),
-        html.Th("Max Adv T(sgnl)", style={"minWidth": "140px"}),
-        html.Th("Max Exp %(sgnl)", style={"minWidth": "100px"}),
-        html.Th("Max Exp T(sgnl)", style={"minWidth": "140px"}),           
-        html.Th("Max Adv %(bef ret lvl)", style={"minWidth": "140px"}),
-        html.Th("Time (bef ret lvl)", style={"minWidth": "140px"}),
-        html.Th("Max Adv %(bef ret sgnl)", style={"minWidth": "140px"}),
-        html.Th("Time (bef ret sgnl)", style={"minWidth": "140px"}),
-        html.Th("DD% (Lvl)", style={"minWidth": "80px"}),
-        html.Th("DD Time (Lvl)", style={"minWidth": "140px"}),
-        html.Th("DD% (1%)", style={"minWidth": "80px"}),
-        html.Th("DD Time (1%)", style={"minWidth": "140px"}),
-        html.Th("DD% (1.5%)", style={"minWidth": "80px"}),
-        html.Th("DD Time (1.5%)", style={"minWidth": "140px"}),
-        html.Th("DD% (2%)", style={"minWidth": "80px"}),
-        html.Th("DD Time (2%)", style={"minWidth": "140px"}),
-        html.Th("Strategy", style={"minWidth": "120px"}),
-        html.Th("Confidence", style={"minWidth": "80px"}),
-        html.Th("Impulse #", style={"minWidth": "80px"}),
-        html.Th("Log", style={"minWidth": "200px"}),
-        html.Th("Actions", style={"minWidth": "180px"})
-    ]), style={'position': 'sticky', 'top': 0, 'backgroundColor': '#f0f0f0', 'zIndex': 10})
-
-
-def render_pagination_nav(current_page, total_pages):
-    """
-    Render pagination navigation buttons.
-    Input: Current page number (0-indexed), total pages count
-    Output: html.Div with navigation buttons
-    """
-    nav_buttons = []
-    nav_buttons.append(html.Button("<< Prev", id={"type":"page-nav","index":"prev"}, disabled=(current_page==0), style={"margin":"2px"}))
-    for p in range(total_pages):
-        btn_style = {"margin":"2px", "padding":"2px 6px", "fontWeight":"bold" if p==current_page else "normal"}
-        nav_buttons.append(html.Button(str(p+1), id={"type":"page-nav","index":p}, style=btn_style))
-    nav_buttons.append(html.Button("Next >>", id={"type":"page-nav","index":"next"}, disabled=(current_page==total_pages-1), style={"margin":"2px"}))
-    return html.Div(nav_buttons, style={"display":"flex", "alignItems":"center", "marginBottom":"8px", "justifyContent":"center"})
-
-
-def render_basic_stats_table(completed_count, total_tasks, avg_adv, avg_dd):
-    """
-    Render basic statistics table (completion rate, averages).
-    Input: Pre-calculated statistics
-    Output: html.Table with basic stats
-    """
-    stats_rows = [
-        html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
-        html.Tr([html.Td("📦 Total Tasks"), html.Td(str(total_tasks))]),
-        html.Tr([html.Td("📉 Avg Max Adverse (All)"), html.Td(fmt_dd_ui(avg_adv))]),
-        html.Tr([html.Td("📉 Avg Drawdown Lvl (All)"), html.Td(fmt_dd_ui(avg_dd))])
-    ]
-    return html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-
-
-def render_signal_stats_table(tasks):
-    """
-    Render detailed signal performance statistics table.
-    Input: Full list of task objects (for iteration)
-    Output: html.Table with comprehensive signal stats
-    Note: This function DOES iterate and calculate stats from raw task data.
-          This is intentional as it's a calculation function, not pure rendering.
-          In future phases, this calculation logic will be extracted separately.
-    """
-    total_tasks = len(tasks)
-    reached_level_cnt = sum(1 for t in tasks if t.reached_level)
-    reversed_dir_cnt = sum(1 for t in tasks if t.reversed_direction)
-    hit_1_cnt = sum(1 for t in tasks if t.reached_level and t.hit_1)
-    hit_1_5_cnt = sum(1 for t in tasks if t.reached_level and t.hit_1_5)
-    hit_2_cnt = sum(1 for t in tasks if t.reached_level and t.hit_2)
-    
-    def fmt_stat(stat_count, total):
-        if total == 0: return "0 / 0 (0.0%)"
-        return f"{stat_count} / {total} ({(stat_count/total)*100:.1f}%)"
-
-    # ----- Max Adverse Distribution Stats (compact format) -----
-    def get_adverse_range_ui(pct):
-        if pct is None or (isinstance(pct, float) and pd.isna(pct)):
-            return None
-        if 0 <= pct < 0.5: return "0-0.5%"
-        elif 0.5 <= pct < 1: return "0.5-1%"
-        elif 1 <= pct < 2: return "1-2%"
-        elif 2 <= pct < 3: return "2-3%"
-        elif 3 <= pct < 4: return "3-4%"
-        elif 4 <= pct < 5: return "4-5%"
-        elif 5 <= pct < 10: return "5-10%"
-        elif 10 <= pct < 20: return "10-20%"
-        elif 20 <= pct < 30: return "20-30%"
-        elif pct >= 30: return ">30%"
-        return None
-
-    # Count tasks in each adverse range (only for reached_level tasks)
-    adverse_counts = {}
-    for t in tasks:
-        adv = t.max_adverse_move_pct
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-            range_key = get_adverse_range_ui(adv)
-            if range_key:
-                adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
-
-    # Format as two compact rows (5 ranges each) to save vertical space
-    ranges = ["0-0.5%", "0.5-1%", "1-2%", "2-3%", "3-4%", "4-5%", "5-10%", "10-20%", "20-30%", ">30%"]
-    row1_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[:5]])
-    row2_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[5:]])
-
-    # Calculate cumulative totals for Max Adverse
-    adv_05_plus_total = 0
-    adv_4_plus_total = 0
-    for t in tasks:
-        adv = t.max_adverse_move_pct
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-            if adv >= 0.5:
-                adv_05_plus_total += 1
-            if adv >= 4.0:
-                adv_4_plus_total += 1
-
-    # Calculate distribution & cumulative totals for Max Expected
-    exp_counts = {}
-    exp_05_plus_total = 0
-    exp_4_plus_total = 0
-    for t in tasks:
-        exp = t.max_expected_move_pct
-        if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
-            range_key = get_adverse_range_ui(exp)
-            if range_key:
-                exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
-            if exp >= 0.5:
-                exp_05_plus_total += 1
-            if exp >= 4.0:
-                exp_4_plus_total += 1
-                
-    row1_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[:5]])
-    row2_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[5:]])
-
-    # Define uniform style for all cells in the summary table
-    td_style = {"fontSize": "13px", "fontWeight": "normal", "padding": "2px 5px"}
-    
-    # Calculate (sgnl) statistics for Adverse & Expected
-    adv_sgnl_counts = {}; exp_sgnl_counts = {}
-    adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
-    for t in tasks:
-        adv_s = t.max_adverse_sgnl_pct
-        if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
-            r = get_adverse_range_ui(adv_s)
-            if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
-            if adv_s >= 0.5: adv_sgnl_05 += 1
-            if adv_s >= 4.0: adv_sgnl_4 += 1
-        exp_s = t.max_expected_sgnl_pct
-        if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
-            r = get_adverse_range_ui(exp_s)
-            if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
-            if exp_s >= 0.5: exp_sgnl_05 += 1
-            if exp_s >= 4.0: exp_sgnl_4 += 1
-            
-    row1_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[:5]])
-    row2_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[5:]])
-    row1_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[:5]])
-    row2_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[5:]])
-    
-    # Delta Price (sgnl to lvl) Distribution
-    delta_counts = {k: 0 for k in ranges}
-    delta_05_plus_total = 0
-    delta_4_plus_total = 0
-    for t in tasks:
-        dp = t.price_change_pct
-        if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
-            val = abs(dp)
-            r = get_adverse_range_ui(val)
-            if r:
-                delta_counts[r] += 1
-            if val >= 0.5: delta_05_plus_total += 1
-            if val >= 4.0: delta_4_plus_total += 1
-
-    row1_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[:5]])
-    row2_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[5:]])
-
-    signal_stats_rows = [
-        html.Tr([html.Td("Reached Level", style=td_style), html.Td(fmt_stat(reached_level_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Reversed Direction", style=td_style), html.Td(fmt_stat(reversed_dir_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Hit 1% (from level)", style=td_style), html.Td(fmt_stat(hit_1_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Hit 1.5% (from level)", style=td_style), html.Td(fmt_stat(hit_1_5_cnt, total_tasks), style=td_style)]),
-        html.Tr([html.Td("Hit 2% (from level)", style=td_style), html.Td(fmt_stat(hit_2_cnt, total_tasks), style=td_style)]),
-        # Max Adverse (lvl) Rows
-        html.Tr([html.Td("Max Adv 0-4% (lvl)", style=td_style), html.Td(row1_adv, style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ (lvl)", style=td_style), html.Td(row2_adv, style=td_style)]),
-        html.Tr([html.Td("Max Adv 0.5%+ Total (lvl)", style=td_style), html.Td(str(adv_05_plus_total), style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ Total (lvl)", style=td_style), html.Td(str(adv_4_plus_total), style=td_style)]),
-        # Max Expected (lvl) Rows
-        html.Tr([html.Td("Max Exp 0-4% (lvl)", style=td_style), html.Td(row1_exp, style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ (lvl)", style=td_style), html.Td(row2_exp, style=td_style)]),
-        html.Tr([html.Td("Max Exp 0.5%+ Total (lvl)", style=td_style), html.Td(str(exp_05_plus_total), style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ Total (lvl)", style=td_style), html.Td(str(exp_4_plus_total), style=td_style)]),
-        # Max Adverse (sgnl) Rows
-        html.Tr([html.Td("Max Adv 0-4% (sgnl)", style=td_style), html.Td(row1_adv_s, style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ (sgnl)", style=td_style), html.Td(row2_adv_s, style=td_style)]),
-        html.Tr([html.Td("Max Adv 0.5%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_05), style=td_style)]),
-        html.Tr([html.Td("Max Adv 4%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_4), style=td_style)]),
-        # Max Expected (sgnl) Rows
-        html.Tr([html.Td("Max Exp 0-4% (sgnl)", style=td_style), html.Td(row1_exp_s, style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ (sgnl)", style=td_style), html.Td(row2_exp_s, style=td_style)]),
-        html.Tr([html.Td("Max Exp 0.5%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_05), style=td_style)]),
-        html.Tr([html.Td("Max Exp 4%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_4), style=td_style)]),
-        # Delta Price Rows
-        html.Tr([html.Td("Delta Price 0-4%", style=td_style), html.Td(row1_delta, style=td_style)]),
-        html.Tr([html.Td("Delta Price 4%+", style=td_style), html.Td(row2_delta, style=td_style)]),
-        html.Tr([html.Td("Delta Price 0.5%+ Total", style=td_style), html.Td(str(delta_05_plus_total), style=td_style)]),
-        html.Tr([html.Td("Delta Price 4%+ Total", style=td_style), html.Td(str(delta_4_plus_total), style=td_style)]),
-    ]
-    return html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
-
-
-# 🔧 REMOVED DUPLICATE: This was a duplicate function definition without @app.callback decorator
-# The actual callback is defined at line 3695 with the proper @app.callback decorator
-# def update_task_table_only(current_page, version, lock_state, analysis_trigger):
-#     \"\"\"Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes.\"\"\"
-#     global golden_task_store_data, golden_store_version, _page_html_cache, _cached_golden_version, cached_signal_stats_html, cached_small_stats_data, stats_cache_version
-
-
-    
-    # Initialize timer for full trace
-    timer = PerfTimer(f"Page {current_page} Render (v{version})").start()
-    
-    # Validate global state
-    if not hasattr(app, 'layout') or app.layout is None:
-        timer.check("Validation Failed").end()
-        return html.Div("", style={"display": "none"})
-    
-    # Get triggered input
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        timer.check("No Trigger").end()
-        return dash.no_update
-        
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    print(f"[DEBUG] 🔍 TRIGGER: {triggered_id} | version={version} | page={current_page}")
-    timer.check(f"Trigger Detected: {triggered_id}")
-    
-    # If only lock changed, don't re-render table
-    if triggered_id == "recalc-lock-store" and version == getattr(update_task_table_only, '_last_version', None):
-        print(f"[TRACE] Skipping render - lock change only")
-        timer.check("Lock Skip").end()
-        return dash.no_update
-    
-    update_task_table_only._last_version = version
-    print(f"[DEBUG] 📊 STATE: golden_store_version={golden_store_version}, cache_size={len(_page_html_cache)}")
-    
-    # Lock check
-    if lock_state and lock_state.get("locked", False):
-        timer.check("Lock Active").end()
-        return html.Div("⏳ Recalculating... Please wait", style={"textAlign": "center", "padding": "20px", "fontSize": "16px", "color": "#666"})
-    
-    # Get tasks from Golden Store
-    t0 = time.time()
-    if golden_task_store_data is not None and len(golden_task_store_data) > 0:
-        tasks = golden_task_store_data
-        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from golden store")
-    else:
-        with tm.lock:
-            tasks = list(tm.tasks.values())
-        print(f"[TRACE] ✓ Loaded {len(tasks)} tasks from task_manager")
-    timer.check(f"Step 1: Get Data ({len(tasks)} tasks)")
-    
-    if not tasks:
-        print("[TRACE] ✗ No tasks found")
-        timer.end()
-        return "No tasks."
-    
-    # CRITICAL CACHE CHECK
-    current_golden_version = golden_store_version
-    print(f"[TRACE] Version check: cached={_cached_golden_version}, current={current_golden_version}")
-    
-    # Invalidate cache if data changed
-    if _cached_golden_version != current_golden_version:
-        print(f"[TRACE] 🔄 Cache invalidated: {_cached_golden_version} -> {current_golden_version}")
-        _page_html_cache.clear()
-        _cached_golden_version = current_golden_version
-        timer.check("Cache Invalidated")
-    
-    # ⚡ CRITICAL FIX: Cache MUST use version in key to avoid stale data
-    cache_key = f"page_{current_page}_v{current_golden_version}"
-    
-    # Return cached page if available (INSTANT - no HTML generation)
-    if cache_key in _page_html_cache:
-        print(f"[TRACE] ⚡ CACHE HIT for key '{cache_key}'! Returning cached page {current_page}")
-        timer.check("Cache Hit").end()
-        return _page_html_cache[cache_key]
-    
-    print(f"[TRACE] ❌ CACHE MISS for key '{cache_key}'. Will generate rows.")
-    timer.check("Cache Miss Confirmed")
-    
-    force_refresh = version is not None and version > 0
-    
-    # Pagination Slicing
-    PAGE_SIZE = 300
-    total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
-    current_page = max(0, min(current_page or 0, total_pages - 1))
-    start_idx = current_page * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
-    visible_tasks = tasks[start_idx:end_idx]
-    print(f"[TRACE] ✂️ Sliced tasks [{start_idx}:{end_idx}] → {len(visible_tasks)} visible")
-    timer.check(f"Step 2: Pagination Slice")
-    
-    # Detect if this is ONLY a page navigation (no data change)
-    prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
-    is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
-    
-    # 🔧 CRITICAL FIX: Also treat analysis_trigger as a data change (not page nav)
-    # This ensures full stats are calculated after recalculation completes
-    if triggered_id == "analysis-complete-trigger":
-        is_page_only_nav = False
-        print(f"[TRACE] 🔄 Analysis trigger detected - forcing full stats recalculation")
-    
-    print(f"[TRACE] Navigation detection: triggered={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version} → is_page_only_nav={is_page_only_nav}")
-    timer.check("Navigation Detection")
-    
-    # Store current state for next comparison
-    update_task_table_only._last_golden_version = current_golden_version
-    update_task_table_only._last_page = current_page
-    
-    timer.check("Step 3: Helper Functions Setup")
-    
-    # Generate rows for visible tasks ONLY (300 max) using extracted UI function
-    print(f"[TRACE] 🚀 Starting row generation for {len(visible_tasks)} tasks...")
-    t_row_start = time.time()
-    rows = [render_task_table_row(t) for t in visible_tasks]
-    row_count = len(rows)
-    
-    row_elapsed = time.time() - t_row_start
-    print(f"[TRACE] ✓ Generated {row_count} rows in {row_elapsed:.2f}s ({row_elapsed/row_count*1000:.1f}ms per row)")
-    timer.check(f"Step 4: Row Generation ({row_count} rows)")
-    
-    # Build table HTML using extracted UI function
-    t_table_start = time.time()
-    table = html.Table([
-        render_task_table_header(),
-        html.Tbody(rows)
-    ], style={"width": "100%", "borderCollapse": "collapse"})
-    print(f"[TRACE] ✓ Built table HTML in {time.time() - t_table_start:.2f}s")
-    timer.check("Step 5: Build Table HTML")
-
-    # ⚡ PERFORMANCE: Skip heavy stats calculation on page-only navigation
-    # This is the CRITICAL FIX - stats are calculated ONLY when version changes (data reload/recalc)
-    if is_page_only_nav:
-        # Return minimal stats for page navigation (no heavy iteration over all tasks)
-        # But we still need to show basic stats from ALL tasks (consistent across pages)
-        total_tasks = len(tasks)
-        completed_count = sum(1 for t in tasks if t.status == "completed")
-        
-        # ALL-task averages (still fast - just iterating, not generating HTML)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
-        
-        stats_rows = [
-            html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
-            html.Tr([html.Td("📦 Total Tasks"), html.Td(str(total_tasks))]),
-            html.Tr([html.Td("📉 Avg Max Adverse (All)"), html.Td(fmt_dd_ui(avg_adv))]),
-            html.Tr([html.Td("📉 Avg Drawdown Lvl (All)"), html.Td(fmt_dd_ui(avg_dd))])
-        ]
-        stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-        
-        # 🔧 FIX: Use cached signal stats from ALL tasks (calculated once per version)
-        print(f"[DEBUG] ⏭️ USING CACHED SIGNAL STATS")
-        stats_elapsed = 0.0
-        # Access global cache (already declared at function level)
-        signal_stats_table = cached_signal_stats_html if cached_signal_stats_html else html.Div("ℹ️ Stats loading...", style={"textAlign": "center", "padding": "10px", "color": "#555", "fontStyle": "italic"})
-    else:
-        # 🔧 CRITICAL: Calculate signal stats on ALL tasks when data loads/recalculates
-        print(f"[DEBUG] 🚀 CALCULATING SIGNAL STATS for {len(tasks)} tasks...")
-        
-        t_stats_start = time.time()
-
-        # ✅ BASIC STATS: Calculate only when data changes (not on page nav) - NOW USES ALL TASKS
-        total_tasks = len(tasks)
-        completed_count = sum(1 for t in tasks if t.status == "completed")
-
-        # ALL-task averages (consistent across all pages)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
-
-        stats_rows = [
-            html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
-            html.Tr([html.Td("📦 Total Tasks"), html.Td(str(total_tasks))]),
-            html.Tr([html.Td("📉 Avg Max Adverse (All)"), html.Td(fmt_dd_ui(avg_adv))]),
-            html.Tr([html.Td("📉 Avg Drawdown Lvl (All)"), html.Td(fmt_dd_ui(avg_dd))])
-        ]
-        stats_table = html.Table([html.Tbody(stats_rows)], style={"border": "1px solid #ccc", "padding": "5px", "fontSize": "13px", "backgroundColor": "#f9f9f9"})
-
-        # ✅ SIGNAL STATS: Calculated on ALL in-memory tasks (consistent denominator)
-        reached_level_cnt = sum(1 for t in tasks if t.reached_level)
-        reversed_dir_cnt = sum(1 for t in tasks if t.reversed_direction)
-        hit_1_cnt = sum(1 for t in tasks if t.reached_level and t.hit_1)
-        hit_1_5_cnt = sum(1 for t in tasks if t.reached_level and t.hit_1_5)
-        hit_2_cnt = sum(1 for t in tasks if t.reached_level and t.hit_2)
-        
-        def fmt_stat(stat_count, total):
-            if total == 0: return "0 / 0 (0.0%)"
-            return f"{stat_count} / {total} ({(stat_count/total)*100:.1f}%)"
-
-        # ----- Max Adverse Distribution Stats (compact format) -----
-        def get_adverse_range_ui(pct):
-            if pct is None or (isinstance(pct, float) and pd.isna(pct)):
-                return None
-            if 0 <= pct < 0.5: return "0-0.5%"
-            elif 0.5 <= pct < 1: return "0.5-1%"
-            elif 1 <= pct < 2: return "1-2%"
-            elif 2 <= pct < 3: return "2-3%"
-            elif 3 <= pct < 4: return "3-4%"
-            elif 4 <= pct < 5: return "4-5%"
-            elif 5 <= pct < 10: return "5-10%"
-            elif 10 <= pct < 20: return "10-20%"
-            elif 20 <= pct < 30: return "20-30%"
-            elif pct >= 30: return ">30%"
-            return None
-
-        # Count tasks in each adverse range (only for reached_level tasks)
-        adverse_counts = {}
-        for t in tasks:
-            adv = t.max_adverse_move_pct
-            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-                range_key = get_adverse_range_ui(adv)
-                if range_key:
-                    adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
-
-        # Format as two compact rows (5 ranges each) to save vertical space
-        ranges = ["0-0.5%", "0.5-1%", "1-2%", "2-3%", "3-4%", "4-5%", "5-10%", "10-20%", "20-30%", ">30%"]
-        row1_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[:5]])
-        row2_adv = " | ".join([f"{r}:{adverse_counts.get(r,0)}" for r in ranges[5:]])
-
-        # 🔧 Calculate cumulative totals for Max Adverse
-        adv_05_plus_total = 0
-        adv_4_plus_total = 0
-        for t in tasks:
-            adv = t.max_adverse_move_pct
-            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
-                if adv >= 0.5:
-                    adv_05_plus_total += 1
-                if adv >= 4.0:
-                    adv_4_plus_total += 1
-
-        # 🔧 NEW: Calculate distribution & cumulative totals for Max Expected
-        exp_counts = {}
-        exp_05_plus_total = 0
-        exp_4_plus_total = 0
-        for t in tasks:
-            exp = t.max_expected_move_pct
-            if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
-                range_key = get_adverse_range_ui(exp)
-                if range_key:
-                    exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
-                if exp >= 0.5:
-                    exp_05_plus_total += 1
-                if exp >= 4.0:
-                    exp_4_plus_total += 1
-                
-        row1_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[:5]])
-        row2_exp = " | ".join([f"{r}:{exp_counts.get(r,0)}" for r in ranges[5:]])
-
-        # Define uniform style for all cells in the summary table
-        td_style = {"fontSize": "13px", "fontWeight": "normal", "padding": "2px 5px"}
-        
-        # Calculate (sgnl) statistics for Adverse & Expected - OPTIMIZED with direct attribute access
-        adv_sgnl_counts = {}; exp_sgnl_counts = {}
-        adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
-        for t in tasks:
-            adv_s = t.max_adverse_sgnl_pct
-            if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
-                r = get_adverse_range_ui(adv_s)
-                if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
-                if adv_s >= 0.5: adv_sgnl_05 += 1
-                if adv_s >= 4.0: adv_sgnl_4 += 1
-            exp_s = t.max_expected_sgnl_pct
-            if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
-                r = get_adverse_range_ui(exp_s)
-                if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
-                if exp_s >= 0.5: exp_sgnl_05 += 1
-                if exp_s >= 4.0: exp_sgnl_4 += 1
-                
-        row1_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[:5]])
-        row2_adv_s = " | ".join([f"{r}:{adv_sgnl_counts.get(r,0)}" for r in ranges[5:]])
-        row1_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[:5]])
-        row2_exp_s = " | ".join([f"{r}:{exp_sgnl_counts.get(r,0)}" for r in ranges[5:]])
-        
-        # Delta Price (sgnl to lvl) Distribution
-        delta_counts = {k: 0 for k in ranges}
-        delta_05_plus_total = 0
-        delta_4_plus_total = 0
-        for t in tasks:
-            dp = t.price_change_pct
-            if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
-                val = abs(dp)
-                r = get_adverse_range_ui(val)
-                if r:
-                    delta_counts[r] += 1
-                if val >= 0.5: delta_05_plus_total += 1
-                if val >= 4.0: delta_4_plus_total += 1
-
-        row1_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[:5]])
-        row2_delta = " | ".join([f"{r}:{delta_counts[r]}" for r in ranges[5:]])
-
-        signal_stats_rows = [
-            html.Tr([html.Td("Reached Level", style=td_style), html.Td(fmt_stat(reached_level_cnt, total_tasks), style=td_style)]),
-            html.Tr([html.Td("Reversed Direction", style=td_style), html.Td(fmt_stat(reversed_dir_cnt, total_tasks), style=td_style)]),
-            html.Tr([html.Td("Hit 1% (from level)", style=td_style), html.Td(fmt_stat(hit_1_cnt, total_tasks), style=td_style)]),
-            html.Tr([html.Td("Hit 1.5% (from level)", style=td_style), html.Td(fmt_stat(hit_1_5_cnt, total_tasks), style=td_style)]),
-            html.Tr([html.Td("Hit 2% (from level)", style=td_style), html.Td(fmt_stat(hit_2_cnt, total_tasks), style=td_style)]),
-            # Max Adverse (lvl) Rows
-            html.Tr([html.Td("Max Adv 0-4% (lvl)", style=td_style), html.Td(row1_adv, style=td_style)]),
-            html.Tr([html.Td("Max Adv 4%+ (lvl)", style=td_style), html.Td(row2_adv, style=td_style)]),
-            html.Tr([html.Td("Max Adv 0.5%+ Total (lvl)", style=td_style), html.Td(str(adv_05_plus_total), style=td_style)]),
-            html.Tr([html.Td("Max Adv 4%+ Total (lvl)", style=td_style), html.Td(str(adv_4_plus_total), style=td_style)]),
-            # Max Expected (lvl) Rows
-            html.Tr([html.Td("Max Exp 0-4% (lvl)", style=td_style), html.Td(row1_exp, style=td_style)]),
-            html.Tr([html.Td("Max Exp 4%+ (lvl)", style=td_style), html.Td(row2_exp, style=td_style)]),
-            html.Tr([html.Td("Max Exp 0.5%+ Total (lvl)", style=td_style), html.Td(str(exp_05_plus_total), style=td_style)]),
-            html.Tr([html.Td("Max Exp 4%+ Total (lvl)", style=td_style), html.Td(str(exp_4_plus_total), style=td_style)]),
-            # Max Adverse (sgnl) Rows
-            html.Tr([html.Td("Max Adv 0-4% (sgnl)", style=td_style), html.Td(row1_adv_s, style=td_style)]),
-            html.Tr([html.Td("Max Adv 4%+ (sgnl)", style=td_style), html.Td(row2_adv_s, style=td_style)]),
-            html.Tr([html.Td("Max Adv 0.5%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_05), style=td_style)]),
-            html.Tr([html.Td("Max Adv 4%+ Total (sgnl)", style=td_style), html.Td(str(adv_sgnl_4), style=td_style)]),
-            # Max Expected (sgnl) Rows
-            html.Tr([html.Td("Max Exp 0-4% (sgnl)", style=td_style), html.Td(row1_exp_s, style=td_style)]),
-            html.Tr([html.Td("Max Exp 4%+ (sgnl)", style=td_style), html.Td(row2_exp_s, style=td_style)]),
-            html.Tr([html.Td("Max Exp 0.5%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_05), style=td_style)]),
-            html.Tr([html.Td("Max Exp 4%+ Total (sgnl)", style=td_style), html.Td(str(exp_sgnl_4), style=td_style)]),
-            # Delta Price Rows
-            html.Tr([html.Td("Delta Price 0-4%", style=td_style), html.Td(row1_delta, style=td_style)]),
-            html.Tr([html.Td("Delta Price 4%+", style=td_style), html.Td(row2_delta, style=td_style)]),
-            html.Tr([html.Td("Delta Price 0.5%+ Total", style=td_style), html.Td(str(delta_05_plus_total), style=td_style)]),
-            html.Tr([html.Td("Delta Price 4%+ Total", style=td_style), html.Td(str(delta_4_plus_total), style=td_style)]),
-        ]
-        signal_stats_table = html.Table([html.Tbody(signal_stats_rows)], style={"border": "1px solid #4a90e2", "padding": "5px", "marginTop": "10px", "backgroundColor": "#f0f7ff"})
-        
-        # Cache the stats for ALL tasks (calculated once per version)
-        cached_signal_stats_html = signal_stats_table
-        cached_small_stats_data = {"completed": completed_count, "total": total_tasks, "avg_adv": avg_adv, "avg_dd": avg_dd}
-        stats_cache_version = golden_store_version
-        
-        stats_elapsed = time.time() - t_stats_start
-        print(f"[DEBUG] ✅ SIGNAL STATS COMPLETE in {stats_elapsed:.2f}s (cached for version {stats_cache_version})")
-    
-    # 🔧 PAGINATION NAVIGATION
-    nav_buttons = []
-    nav_buttons.append(html.Button("<< Prev", id={"type":"page-nav","index":"prev"}, disabled=(current_page==0), style={"margin":"2px"}))
-    for p in range(total_pages):
-        btn_style = {"margin":"2px", "padding":"2px 6px", "fontWeight":"bold" if p==current_page else "normal"}
-        nav_buttons.append(html.Button(str(p+1), id={"type":"page-nav","index":p}, style=btn_style))
-    nav_buttons.append(html.Button("Next >>", id={"type":"page-nav","index":"next"}, disabled=(current_page==total_pages-1), style={"margin":"2px"}))
-    nav_container = html.Div(nav_buttons, style={"display":"flex", "alignItems":"center", "marginBottom":"8px", "justifyContent":"center"})
-    timer.check("Step 7: Build Pagination Nav")
-
-    result = html.Div([
-        html.H4("Task Summary"),
-        nav_container,
-        html.Div(table, style={"overflow-x": "auto", "overflow-y": "auto", "max-height": "75vh", "width": "100%"}),
-        html.P(f"📄 Page {current_page+1} of {total_pages} | Showing tasks {start_idx+1}-{min(end_idx, len(tasks))} of {len(tasks)}", style={"textAlign":"center", "fontSize":"12px", "color":"#555"}),
-        stats_table,
-        html.H5("Signal Performance Summary", style={"marginTop": "15px", "marginBottom": "5px"}),
-        signal_stats_table,
-        html.P(
-            "ℹ️ Hit % metrics measure price movement ≥1%/1.5%/2% **in the EXPECTED direction** from the signal level base. "
-            "Resistance: Price moves UP ≥X% from level. Support: Price moves DOWN ≥X% from level. "
-            "Hits are only counted if the price actually touched the level first.",
-            style={"fontSize": "11px", "color": "#777", "marginTop": "6px", "marginBottom": "0", "fontStyle": "italic"}
-        )
-    ])
-    timer.check("Step 8: Build Final Result Div")
-    
-    # ⚡ CACHE THE RESULT with version key for instant page switching (ALWAYS cache, regardless of stats)
-    # The table HTML is the same whether we calculated full stats or page-only stats
-    _page_html_cache[cache_key] = result
-    timer.check("Step 9: Cache Result")
-    
-    # Print final timing
-    timer.end()
-    print(f"[TRACE] <<< COMPLETE Page {current_page} rendered in {timer.last_time - timer.start_time:.4f}s | Cache Size: {len(_page_html_cache)}")
-    print(f"[TRACE] ✓✓✓ RETURNING RESULT TO DASH UI ✓✓✓")
-    
     return result
 
 @app.callback(
@@ -5590,12 +5095,164 @@ def update_task_chart(task_id, rsi_visible, strategy_visible, impulse_visible, e
     fig.update_xaxes(tickformat="%H:%M", ticklabelmode="period", ticks="outside")
     return fig
 
-# =============================================================================
-# NOTE: Database-related callbacks have been moved to database.py
-# and are registered via register_database_callbacks(app) below.
-# This includes: verification controls, chart updates, delete operations,
-# download functions, and database maintenance callbacks.
-# =============================================================================
+# ----- Verification callbacks (unchanged) -----
+@app.callback(
+    Output("start-verify-btn", "disabled"),
+    Output("start-deep-verify-btn", "disabled"),
+    Output("stop-verify-btn", "disabled"),
+    Input("start-verify-btn", "n_clicks"),
+    Input("start-deep-verify-btn", "n_clicks"),
+    Input("stop-verify-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def control_verification(start_clicks, deep_clicks, stop_clicks):
+    triggered = ctx.triggered_id
+    if triggered == "start-verify-btn" and not vm.running:
+        vm.start_verification(deep=False)
+        return True, True, False
+    elif triggered == "start-deep-verify-btn" and not vm.running:
+        vm.start_verification(deep=True)
+        return True, True, False
+    elif triggered == "stop-verify-btn" and vm.running:
+        vm.stop_verification()
+        return no_update, no_update, no_update
+    return no_update, no_update, no_update
+
+@app.callback(
+    Output("start-verify-btn", "disabled", allow_duplicate=True),
+    Output("start-deep-verify-btn", "disabled", allow_duplicate=True),
+    Output("stop-verify-btn", "disabled", allow_duplicate=True),
+    Input("verify-interval", "n_intervals"),
+    prevent_initial_call=True
+)
+def update_button_states(_):
+    if not vm.running:
+        return False, False, True
+    return True, True, False
+
+@app.callback(
+    Output("verify-log", "children"),
+    Input("verify-interval", "n_intervals")
+)
+def update_verify_log(_):
+    return vm.get_logs()
+
+@app.callback(
+    Output("download-report", "data"),
+    Input("generate-report-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def generate_report(_):
+    report = vm.generate_integrity_report()
+    report_str = json.dumps(report, indent=2)
+    return dcc.send_string(report_str, f"integrity_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+@app.callback(
+    Output("duckdb-result", "children"),
+    Input("run-duckdb-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def run_duckdb_query(_):
+    if not DUCKDB_AVAILABLE:
+        return "DuckDB not installed. Please run: pip install duckdb"
+    try:
+        conn = duckdb.connect()
+        query = """
+        SELECT
+        regexp_extract(filename, 'market_data/([^/]+)/', 1) as symbol,
+        COUNT(*) as candle_count,
+        MIN(timestamp) as earliest,
+        MAX(timestamp) as latest,
+        AVG(close) as avg_close,
+        STDDEV(close) as volatility,
+        SUM(volume) as total_volume
+        FROM read_parquet('market_data/*/60/data.parquet', filename=true)
+        GROUP BY symbol
+        ORDER BY symbol
+        """
+        df = conn.execute(query).df()
+        return df.to_string()
+    except Exception as e:
+        return f"Error: {e}"
+
+@app.callback(
+    Output("chart-timeframe-dropdown", "options"),
+    Input("chart-symbol-dropdown", "value")
+)
+def update_timeframe_options(selected_symbol):
+    if not selected_symbol:
+        return []
+    info = get_database_info()
+    timeframes = sorted(set(
+        d["timeframe"] for d in info["details"] if d["symbol"] == selected_symbol
+    ))
+    return [{"label": tf, "value": tf} for tf in timeframes]
+
+@app.callback(
+    Output("candlestick-chart", "figure"),
+    Input("chart-symbol-dropdown", "value"),
+    Input("chart-timeframe-dropdown", "value")
+)
+def update_chart(symbol, timeframe):
+    if not symbol or not timeframe:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        fig.update_layout(title="Select a symbol and timeframe to view chart")
+        return fig
+    path = symbol_timeframe_path(symbol, timeframe)
+    file_path = os.path.join(path, "data.parquet")
+    if not os.path.exists(file_path):
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        fig.update_layout(title=f"No data for {symbol} {timeframe}")
+        return fig
+    df = pd.read_parquet(file_path)
+    if df.empty:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        fig.update_layout(title=f"Empty data for {symbol} {timeframe}")
+        return fig
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
+    fig.add_trace(go.Candlestick(
+        x=df['date'],
+        open=df['open'],
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        name="OHLC",
+        increasing_line_color='#26a69a',
+        decreasing_line_color='#ef5350'
+    ), row=1, col=1)
+    colors = ['#26a69a' if row['close'] >= row['open'] else '#ef5350' for _, row in df.iterrows()]
+    fig.add_trace(go.Bar(
+        x=df['date'],
+        y=df['volume'],
+        name="Volume",
+        marker_color=colors,
+        showlegend=False
+    ), row=2, col=1)
+    fig.update_layout(
+        title=f"{symbol} – {timeframe}",
+        xaxis_rangeslider_visible=False,
+        template="plotly_white",
+        hovermode="x unified",
+        height=600,
+        margin=dict(l=50, r=50, t=50, b=50)
+    )
+    fig.update_xaxes(title_text="Date", row=2, col=1)
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    return fig
+
+@app.callback(Output("download-db", "data"),
+              Input("download-db-btn", "n_clicks"),
+              prevent_initial_call=True)
+def backup(_):
+    zip_name = f"market_data_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    shutil.make_archive(zip_name.replace('.zip', ''), 'zip', MARKET_DATA_DIR)
+    return dcc.send_file(zip_name)
 
 # ----- Impulse callbacks -----
 @app.callback(
@@ -6274,12 +5931,117 @@ def rerun_impulse_on_all(n_clicks, range_mult, vol_mult, body_ratio, wick_ratio,
             task.add_log(f"Re‑run Impulse on All error: {e}")
     return f"Re‑run Impulse completed on {success} tasks. Total impulse signals: {total_impulse}"
 
-# =============================================================================
-# NOTE: Database Maintenance callbacks have been moved to database.py
-# and are registered via register_database_callbacks(app) below.
-# This includes: clean-symbol/timeframe options, delete operations,
-# redownload functions, and database backup functionality.
-# =============================================================================
+# ----- Database Maintenance Callbacks -----
+@app.callback(
+    Output("clean-symbol", "options"),
+    Input("main-tabs", "value")
+)
+def update_clean_symbols(tab):
+    if tab != "tab-analysis":
+        return []
+    info = get_database_info()
+    symbols = sorted(set(d["symbol"] for d in info["details"]))
+    return [{"label": s, "value": s} for s in symbols]
+
+@app.callback(
+    Output("clean-timeframe", "options"),
+    Input("clean-symbol", "value")
+)
+def update_clean_timeframes(symbol):
+    if not symbol:
+        return []
+    info = get_database_info()
+    timeframes = sorted(set(d["timeframe"] for d in info["details"] if d["symbol"] == symbol))
+    return [{"label": tf, "value": tf} for tf in timeframes]
+
+@app.callback(
+    Output("delete-status", "children"),
+    Input("delete-selected-btn", "n_clicks"),
+    State("clean-symbol", "value"),
+    State("clean-timeframe", "value"),
+    prevent_initial_call=True
+)
+def delete_selected_data(n_clicks, symbol, timeframe):
+    if not symbol or not timeframe:
+        return "❌ Please select both symbol and timeframe."
+    path = symbol_timeframe_path(symbol, timeframe)
+    fp = os.path.join(path, "data.parquet")
+    if not os.path.exists(fp):
+        return f"⚠️ Data file not found for {symbol} {timeframe}."
+    try:
+        os.remove(fp)
+        if os.path.exists(path) and not os.listdir(path):
+            os.rmdir(path)
+        return f"✅ Deleted {symbol} {timeframe} data. You can now re‑run tasks with 'Overwrite' checked."
+    except Exception as e:
+        return f"❌ Error deleting: {str(e)}"
+
+@app.callback(
+    Output("delete-all-btn", "disabled"),
+    Input("confirm-delete-all", "value")
+)
+def enable_delete_all(confirm):
+    return "confirm" not in confirm
+
+@app.callback(
+    Output("delete-status", "children", allow_duplicate=True),
+    Input("delete-all-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def delete_all_data(n_clicks):
+    if n_clicks is None:
+        return ""
+    try:
+        import shutil
+        shutil.rmtree(MARKET_DATA_DIR)
+        os.makedirs(MARKET_DATA_DIR, exist_ok=True)
+        return "✅ All market data deleted. You can now re‑run tasks to download fresh data."
+    except Exception as e:
+        return f"❌ Error deleting all data: {str(e)}"
+
+@app.callback(
+    Output("delete-status", "children", allow_duplicate=True),
+    Input("redownload-full-btn", "n_clicks"),
+    State("clean-symbol", "value"),
+    State("clean-timeframe", "value"),
+    prevent_initial_call=True
+)
+def redownload_full_history(n_clicks, symbol, timeframe):
+    if not symbol or not timeframe:
+        return "❌ Please select both symbol and timeframe."
+    # Delete existing file first
+    path = symbol_timeframe_path(symbol, timeframe)
+    fp = os.path.join(path, "data.parquet")
+    if os.path.exists(fp):
+        os.remove(fp)
+    if os.path.exists(path) and not os.listdir(path):
+        os.rmdir(path)
+    # Create a task with mode='full'
+    import uuid
+    import time
+    tid = str(uuid.uuid4())
+    fake_signal_time = int(time.time() * 1000)
+    task = DownloadTask(
+        task_id=tid,
+        symbols=[symbol],
+        timeframe=timeframe,
+        mode='full',
+        start_date=None,
+        end_date=None,
+        overwrite=True,
+        price_continuity_check=False,
+        signal_time=fake_signal_time,
+        signal_price=0,
+        signal_symbol=symbol,
+        signal_direction='resistance',
+        analyze_beyond=False,
+        enable_strategy=False,
+        enable_impulse=False,
+        pre_buffer_minutes=5
+    )
+    tm.add_task(task)
+    task.add_log(f"Re‑download full history for {symbol} {timeframe}")
+    return f"🔄 Started re‑download of full history for {symbol} {timeframe}. Watch the Tasks tab for progress."
 
 # ----- Active Download Monitor Callbacks -----
 @app.callback(
@@ -6370,7 +6132,7 @@ def redownload_all_existing(n_clicks):
         return f"❌ Error: {str(e)}"
 
 @app.callback(
-    Output("bulk-rerun-status", "children", allow_duplicate=True),
+    Output("bulk-rerun-status", "children"),
     Input("bulk-rerun-events", "n_clicks"),
     Input("bulk-rerun-strategy", "n_clicks"),
     Input("bulk-rerun-impulse", "n_clicks"),
@@ -6379,7 +6141,7 @@ def redownload_all_existing(n_clicks):
 def bulk_rerun_all(ev_n, str_n, imp_n):
     triggered = ctx.triggered_id
     if not triggered:
-        return no_update
+        return "Ready"
     
     tasks = tm.get_all_tasks()
     completed = [t for t in tasks if t.status == "completed"]
@@ -6534,23 +6296,22 @@ def save_tasks_to_json(n, filename):
     Output("task-count-store", "data", allow_duplicate=True),
     Output("task-page-store", "data", allow_duplicate=True),
     Output("analysis-complete-trigger", "data", allow_duplicate=True), # 🔧 NEW
-    Output("golden-store-version", "data", allow_duplicate=True), # 🔧 CRITICAL FIX: Update version store to trigger table refresh
     Input("load-tasks-btn", "n_clicks"),
     State("json-file-select", "value"),
     prevent_initial_call=True
 )
 def load_tasks_from_json(n, filepath):
     if not filepath or not os.path.exists(filepath):
-        return "⚠️ Please select a valid JSON file.", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
+        return "⚠️ Please select a valid JSON file.", [], 0, 0, 0  # 🔧 Added 5th value (trigger=0)
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if not isinstance(data, list):
-            return "❌ Invalid JSON format: expected a list of tasks.", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
+            return "❌ Invalid JSON format: expected a list of tasks.", [], 0, 0, 0  # 🔧 Added 5th value
     except json.JSONDecodeError as e:
-        return f"❌ JSON Syntax Error at line {e.lineno}, col {e.colno}: {e.msg}.", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
+        return f"❌ JSON Syntax Error at line {e.lineno}, col {e.colno}: {e.msg}.", [], 0, 0, 0  # 🔧 Added 5th value
     except Exception as e:
-        return f"❌ Load failed: {str(e)}", [], 0, 0, 0, dash.no_update  # 🔧 Added 6th value
+        return f"❌ Load failed: {str(e)}", [], 0, 0, 0  # 🔧 Added 5th value
         
     loaded_ids = []
     skipped = 0
@@ -6632,7 +6393,7 @@ def load_tasks_from_json(n, filepath):
     import time
     trigger_val = int(time.time()) 
     
-    return msg, loaded_ids, count, 0, trigger_val, golden_store_version
+    return msg, loaded_ids, count, 0, trigger_val
 
 @app.callback(
     Output("save-load-status", "children", allow_duplicate=True),
@@ -6948,11 +6709,7 @@ def poll_recalc_progress(_):
                 return f"✅ Recalculation complete. ({recalc_bg['count']}/{recalc_bg['total']} tasks updated)", trigger_val
             return f"✅ Recalculation complete. ({recalc_bg['count']}/{recalc_bg['total']} tasks updated)", dash.no_update
         else:
-            # Only return no_update if recalculation never started
-            if recalc_bg["count"] == 0:
-                return no_update, dash.no_update
-            # Otherwise show completion status even without total
-            return f"✅ Recalculation complete. ({recalc_bg['count']} tasks updated)", dash.no_update
+            return no_update, dash.no_update
     return f"⏳ Recalculating... {recalc_bg['count']}/{recalc_bg['total']} completed", dash.no_update
 
 # 🔧 NEW: Dedicated poller for triggering UI refresh after recalculation completes
@@ -6982,9 +6739,6 @@ def trigger_ui_on_recalc_complete(n_intervals, is_disabled):
         return False, dash.no_update
     # Keep current state
     return dash.no_update, dash.no_update
-
-# Register database callbacks
-register_database_callbacks(app)
 
 if __name__ == "__main__":
     app.run(debug=True, port=8050)
