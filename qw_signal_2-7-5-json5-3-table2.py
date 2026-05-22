@@ -1,6 +1,6 @@
 """
 Bybit Downloader – Two Tabs + Summary + Optimized Buffering (10k candles)
-with Database Verification Tool and Real‑time Integrity Checks.
+with Database Verification Tool and Real‑time Integrity Checks. 
 Now with signal‑based downloading, candle analysis, and per‑task interactive charts.
 """
 import os, json, time, threading, queue, uuid, shutil, glob, hashlib, re, functools, sys, bisect, math
