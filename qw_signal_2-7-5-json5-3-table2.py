@@ -84,6 +84,16 @@ def fmt_dd_ui(val):
     except Exception:
         return "-"
 
+def is_na(val):
+    """⚡ Ultra-fast NA check without pandas - GLOBAL VERSION for use in all functions"""
+    if val is None:
+        return True
+    if isinstance(val, float):
+        return math.isnan(val)
+    if isinstance(val, np.floating):
+        return np.isnan(val)
+    return False
+
 def get_adverse_range_ui(pct):
     """
     Categorize percentage into ranges for statistics display
@@ -3824,13 +3834,8 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     from datetime import datetime, timezone
     import math
     
-    def is_na(val):
-        """⚡ Ultra-fast NA check without pandas"""
-        if val is None:
-            return True
-        if isinstance(val, float):
-            return math.isnan(val)
-        return False
+    # Use global is_na function instead of local definition for consistency
+    # Local is_na removed to avoid shadowing and ensure np.floating support
     
     def fmt_time(ts):
         """⚡ ULTRA-FAST timestamp formatting - NO pandas calls"""
