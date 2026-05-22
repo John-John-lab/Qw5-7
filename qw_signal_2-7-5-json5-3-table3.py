@@ -3813,15 +3813,23 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     print(f"[TRACE] ✂️ Sliced tasks [{start_idx}:{end_idx}] → {len(visible_tasks)} visible")
     timer.check(f"Step 2: Pagination Slice")
     
-    # Detect if this is ONLY a page navigation (no data change)
+    # Detect if this is ONLY a page navigation (no data change) - ACTIVE FUNCTION v3729
     prev_golden_version = getattr(update_task_table_only, '_last_golden_version', None)
     is_page_only_nav = (triggered_id == "task-page-store") and (prev_golden_version is not None) and (current_golden_version == prev_golden_version)
     
     # 🔧 CRITICAL FIX: Also treat analysis_trigger as a data change (not page nav)
     # This ensures full stats are calculated after recalculation completes
+    # BUT only if the trigger value actually changed (avoid continuous updates)
     if triggered_id == "analysis-complete-trigger":
         is_page_only_nav = False
-        print(f"[TRACE] 🔄 Analysis trigger detected - forcing full stats recalculation")
+        prev_trigger = getattr(update_task_table_only, '_last_analysis_trigger', None)
+        if prev_trigger == analysis_trigger:
+            # Same trigger value - don't re-render (prevents loop)
+            print(f"[TRACE] ⏸️ Analysis trigger unchanged ({analysis_trigger}) - skipping render")
+            timer.check("Trigger Skip").end()
+            return dash.no_update
+        print(f"[TRACE] 🔄 Analysis trigger detected ({prev_trigger} -> {analysis_trigger}) - forcing full stats recalculation")
+        update_task_table_only._last_analysis_trigger = analysis_trigger
     
     print(f"[TRACE] Navigation detection: triggered={triggered_id}, prev_ver={prev_golden_version}, curr_ver={current_golden_version} → is_page_only_nav={is_page_only_nav}")
     timer.check("Navigation Detection")
@@ -6985,9 +6993,9 @@ def trigger_ui_on_recalc_complete(n_intervals, is_disabled):
     """Polls every 1 second during recalculation and triggers UI refresh when complete."""
     global recalc_poller_enabled
     
-    # Check if recalculation just finished
+    # Check if recalculation just finished (transition from running to not running)
     if not recalc_bg["running"] and recalc_poller_enabled:
-        # Recalculation just finished - trigger UI refresh
+        # Recalculation just finished - trigger UI refresh ONCE
         trigger_val = recalc_bg.get("trigger_val", int(time.time() * 1000))
         print(f"🔥 [UI POLLER] Recalculation complete! Triggering UI refresh with value: {trigger_val}")
         # Reset poller state
@@ -6998,7 +7006,10 @@ def trigger_ui_on_recalc_complete(n_intervals, is_disabled):
         # Recalculation started - keep poller enabled (disabled=False)
         recalc_poller_enabled = True
         return False, dash.no_update
-    # Keep current state
+    elif not recalc_bg["running"] and not recalc_poller_enabled:
+        # Already completed and poller disabled - no update needed
+        return dash.no_update, dash.no_update
+    # Keep current state during active recalculation
     return dash.no_update, dash.no_update
 
 # Register database callbacks
