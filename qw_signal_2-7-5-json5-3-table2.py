@@ -40,7 +40,7 @@ def fmt_time_ui(ts):
     """
     if ts is None: return "-"
     try:
-        if isinstance(ts, (float, np.floating)) and pd.isna(ts): return "-"
+        if isinstance(ts, (float, np.floating)) and is_na(ts): return "-"
         if isinstance(ts, (datetime, pd.Timestamp)):
             return ts.strftime("%Y-%m-%d %H:%M")
         if isinstance(ts, str):
@@ -78,7 +78,7 @@ def fmt_dd_ui(val):
     Pure UI function: formats numeric values for table display
     """
     if val is None: return "-"
-    if isinstance(val, (float, np.floating)) and pd.isna(val): return "-"
+    if isinstance(val, (float, np.floating)) and is_na(val): return "-"
     try:
         return f"{float(val):.2f}%"
     except Exception:
@@ -89,7 +89,7 @@ def get_adverse_range_ui(pct):
     Categorize percentage into ranges for statistics display
     Pure UI function: returns range category string
     """
-    if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+    if pct is None or (isinstance(pct, float) and is_na(pct)):
         return None
     if 0 <= pct < 0.5: return "0-0.5%"
     elif 0.5 <= pct < 1: return "0.5-1%"
@@ -2066,7 +2066,7 @@ class DownloadTask:
         self.max_adverse_before_return_sgnl_pct = None
         self.max_adverse_before_return_sgnl_time = None
 
-        if entry_price is None or (isinstance(entry_price, float) and pd.isna(entry_price)):
+        if entry_price is None or (isinstance(entry_price, float) and is_na(entry_price)):
             if self.log_events:
                 self.add_log("⚠️ Cannot determine entry price for sgnl metrics.")
             return
@@ -3542,8 +3542,8 @@ def update_summary_stats_only(version, lock_state):
     
     # ✅ FIXED: Removed page-specific averages from stats (they were causing confusion)
     # Stats now show GLOBAL averages across ALL tasks, not just visible page
-    avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-    avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+    avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not is_na(t.max_adverse_move_pct)] or [0])
+    avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not is_na(t.drawdown_before_level)] or [0])
     
     stats_rows = [
         html.Tr([html.Td("✅ Task Completed 100%"), html.Td(str(completed_count))]),
@@ -3566,7 +3566,7 @@ def update_summary_stats_only(version, lock_state):
 
     # ----- Max Adverse Distribution Stats -----
     def get_adverse_range_ui(pct):
-        if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+        if pct is None or (isinstance(pct, float) and is_na(pct)):
             return None
         if 0 <= pct < 0.5: return "0-0.5%"
         elif 0.5 <= pct < 1: return "0.5-1%"
@@ -3583,7 +3583,7 @@ def update_summary_stats_only(version, lock_state):
     adverse_counts = {}
     for t in tasks:
         adv = getattr(t, 'max_adverse_move_pct', None)
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+        if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
             range_key = get_adverse_range_ui(adv)
             if range_key:
                 adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
@@ -3596,7 +3596,7 @@ def update_summary_stats_only(version, lock_state):
     adv_4_plus_total = 0
     for t in tasks:
         adv = getattr(t, 'max_adverse_move_pct', None)
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+        if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
             if adv >= 0.5:
                 adv_05_plus_total += 1
             if adv >= 4.0:
@@ -3607,7 +3607,7 @@ def update_summary_stats_only(version, lock_state):
     exp_4_plus_total = 0
     for t in tasks:
         exp = getattr(t, 'max_expected_move_pct', None)
-        if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
+        if t.reached_level and exp is not None and not (isinstance(exp, float) and is_na(exp)):
             range_key = get_adverse_range_ui(exp)
             if range_key:
                 exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
@@ -3625,13 +3625,13 @@ def update_summary_stats_only(version, lock_state):
     adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
     for t in tasks:
         adv_s = getattr(t, 'max_adverse_sgnl_pct', None)
-        if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
+        if adv_s is not None and not (isinstance(adv_s, float) and is_na(adv_s)):
             r = get_adverse_range_ui(adv_s)
             if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
             if adv_s >= 0.5: adv_sgnl_05 += 1
             if adv_s >= 4.0: adv_sgnl_4 += 1
         exp_s = getattr(t, 'max_expected_sgnl_pct', None)
-        if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
+        if exp_s is not None and not (isinstance(exp_s, float) and is_na(exp_s)):
             r = get_adverse_range_ui(exp_s)
             if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
             if exp_s >= 0.5: exp_sgnl_05 += 1
@@ -3647,7 +3647,7 @@ def update_summary_stats_only(version, lock_state):
     delta_4_plus_total = 0
     for t in tasks:
         dp = getattr(t, 'price_change_pct', None)
-        if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
+        if dp is not None and not (isinstance(dp, float) and is_na(dp)):
             val = abs(dp)
             r = get_adverse_range_ui(val)
             if r:
@@ -3820,15 +3820,28 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     update_task_table_only._last_golden_version = current_golden_version
     update_task_table_only._last_page = current_page
     
-    # Pre-calculate helper functions ONCE - OPTIMIZED with native datetime
+    # Pre-calculate helper functions ONCE - OPTIMIZED with native datetime (NO pandas)
     from datetime import datetime, timezone
+    import math
+    
+    def is_na(val):
+        """⚡ Ultra-fast NA check without pandas"""
+        if val is None:
+            return True
+        if isinstance(val, float):
+            return math.isnan(val)
+        return False
     
     def fmt_time(ts):
         """⚡ ULTRA-FAST timestamp formatting - NO pandas calls"""
-        if ts is None: return "-"
+        if ts is None:
+            return "-"
         try:
-            if isinstance(ts, (float, np.floating)) and pd.isna(ts): return "-"
-            if isinstance(ts, (datetime, pd.Timestamp)):
+            # Check for NA using native method
+            if isinstance(ts, float) and math.isnan(ts):
+                return "-"
+            # Handle datetime objects directly
+            if isinstance(ts, datetime):
                 return ts.strftime("%Y-%m-%d %H:%M")
             if isinstance(ts, str):
                 # ⚡ FAST PATH: Handle ISO-8601 strings directly (85x faster than pandas)
@@ -3853,15 +3866,15 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
                 return datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return "-"
-        # Fallback to pandas (slow path - should rarely happen)
+        # Fallback (should rarely happen)
         try:
-            return pd.to_datetime(ts).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return "-"
     
     def fmt_dd(val):
-        if val is None: return "-"
-        if isinstance(val, (float, np.floating)) and pd.isna(val): return "-"
+        if val is None or is_na(val):
+            return "-"
         try:
             return f"{float(val):.2f}%"
         except Exception:
@@ -4125,9 +4138,9 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         total_tasks = len(tasks)
         completed_count = sum(1 for t in tasks if t.status == "completed")
         
-        # ALL-task averages (still fast - just iterating, not generating HTML)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        # ALL-task averages (still fast - just iterating, not generating HTML) - NO pandas
+        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not is_na(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not is_na(t.drawdown_before_level)] or [0])
         
         stats_rows = [
             html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
@@ -4153,8 +4166,8 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         completed_count = sum(1 for t in tasks if t.status == "completed")
 
         # ALL-task averages (consistent across all pages)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not is_na(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not is_na(t.drawdown_before_level)] or [0])
 
         stats_rows = [
             html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
@@ -4177,7 +4190,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
 
         # ----- Max Adverse Distribution Stats (compact format) -----
         def get_adverse_range(pct):
-            if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+            if pct is None or (isinstance(pct, float) and is_na(pct)):
                 return None
             if 0 <= pct < 0.5: return "0-0.5%"
             elif 0.5 <= pct < 1: return "0.5-1%"
@@ -4195,7 +4208,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         adverse_counts = {}
         for t in tasks:
             adv = t.max_adverse_move_pct
-            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+            if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
                 range_key = get_adverse_range(adv)
                 if range_key:
                     adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
@@ -4210,7 +4223,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         adv_4_plus_total = 0
         for t in tasks:
             adv = t.max_adverse_move_pct
-            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+            if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
                 if adv >= 0.5:
                     adv_05_plus_total += 1
                 if adv >= 4.0:
@@ -4222,7 +4235,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         exp_4_plus_total = 0
         for t in tasks:
             exp = t.max_expected_move_pct
-            if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
+            if t.reached_level and exp is not None and not (isinstance(exp, float) and is_na(exp)):
                 range_key = get_adverse_range(exp)
                 if range_key:
                     exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
@@ -4242,13 +4255,13 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
         for t in tasks:
             adv_s = t.max_adverse_sgnl_pct
-            if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
+            if adv_s is not None and not (isinstance(adv_s, float) and is_na(adv_s)):
                 r = get_adverse_range(adv_s)
                 if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
                 if adv_s >= 0.5: adv_sgnl_05 += 1
                 if adv_s >= 4.0: adv_sgnl_4 += 1
             exp_s = t.max_expected_sgnl_pct
-            if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
+            if exp_s is not None and not (isinstance(exp_s, float) and is_na(exp_s)):
                 r = get_adverse_range(exp_s)
                 if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
                 if exp_s >= 0.5: exp_sgnl_05 += 1
@@ -4265,7 +4278,7 @@ def update_task_table_only(current_page, version, lock_state, analysis_trigger):
         delta_4_plus_total = 0
         for t in tasks:
             dp = t.price_change_pct
-            if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
+            if dp is not None and not (isinstance(dp, float) and is_na(dp)):
                 val = abs(dp)
                 r = get_adverse_range(val)
                 if r:
@@ -4643,7 +4656,7 @@ def render_signal_stats_table(tasks):
 
     # ----- Max Adverse Distribution Stats (compact format) -----
     def get_adverse_range_ui(pct):
-        if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+        if pct is None or (isinstance(pct, float) and is_na(pct)):
             return None
         if 0 <= pct < 0.5: return "0-0.5%"
         elif 0.5 <= pct < 1: return "0.5-1%"
@@ -4661,7 +4674,7 @@ def render_signal_stats_table(tasks):
     adverse_counts = {}
     for t in tasks:
         adv = t.max_adverse_move_pct
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+        if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
             range_key = get_adverse_range_ui(adv)
             if range_key:
                 adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
@@ -4676,7 +4689,7 @@ def render_signal_stats_table(tasks):
     adv_4_plus_total = 0
     for t in tasks:
         adv = t.max_adverse_move_pct
-        if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+        if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
             if adv >= 0.5:
                 adv_05_plus_total += 1
             if adv >= 4.0:
@@ -4688,7 +4701,7 @@ def render_signal_stats_table(tasks):
     exp_4_plus_total = 0
     for t in tasks:
         exp = t.max_expected_move_pct
-        if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
+        if t.reached_level and exp is not None and not (isinstance(exp, float) and is_na(exp)):
             range_key = get_adverse_range_ui(exp)
             if range_key:
                 exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
@@ -4708,13 +4721,13 @@ def render_signal_stats_table(tasks):
     adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
     for t in tasks:
         adv_s = t.max_adverse_sgnl_pct
-        if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
+        if adv_s is not None and not (isinstance(adv_s, float) and is_na(adv_s)):
             r = get_adverse_range_ui(adv_s)
             if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
             if adv_s >= 0.5: adv_sgnl_05 += 1
             if adv_s >= 4.0: adv_sgnl_4 += 1
         exp_s = t.max_expected_sgnl_pct
-        if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
+        if exp_s is not None and not (isinstance(exp_s, float) and is_na(exp_s)):
             r = get_adverse_range_ui(exp_s)
             if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
             if exp_s >= 0.5: exp_sgnl_05 += 1
@@ -4731,7 +4744,7 @@ def render_signal_stats_table(tasks):
     delta_4_plus_total = 0
     for t in tasks:
         dp = t.price_change_pct
-        if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
+        if dp is not None and not (isinstance(dp, float) and is_na(dp)):
             val = abs(dp)
             r = get_adverse_range_ui(val)
             if r:
@@ -4915,8 +4928,8 @@ def render_signal_stats_table(tasks):
         completed_count = sum(1 for t in tasks if t.status == "completed")
         
         # ALL-task averages (still fast - just iterating, not generating HTML)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not is_na(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not is_na(t.drawdown_before_level)] or [0])
         
         stats_rows = [
             html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
@@ -4942,8 +4955,8 @@ def render_signal_stats_table(tasks):
         completed_count = sum(1 for t in tasks if t.status == "completed")
 
         # ALL-task averages (consistent across all pages)
-        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not pd.isna(t.max_adverse_move_pct)] or [0])
-        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not pd.isna(t.drawdown_before_level)] or [0])
+        avg_adv = np.mean([t.max_adverse_move_pct for t in tasks if t.max_adverse_move_pct is not None and not is_na(t.max_adverse_move_pct)] or [0])
+        avg_dd = np.mean([t.drawdown_before_level for t in tasks if t.drawdown_before_level is not None and not is_na(t.drawdown_before_level)] or [0])
 
         stats_rows = [
             html.Tr([html.Td("✅ Task Completed (Total)"), html.Td(str(completed_count))]),
@@ -4966,7 +4979,7 @@ def render_signal_stats_table(tasks):
 
         # ----- Max Adverse Distribution Stats (compact format) -----
         def get_adverse_range_ui(pct):
-            if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+            if pct is None or (isinstance(pct, float) and is_na(pct)):
                 return None
             if 0 <= pct < 0.5: return "0-0.5%"
             elif 0.5 <= pct < 1: return "0.5-1%"
@@ -4984,7 +4997,7 @@ def render_signal_stats_table(tasks):
         adverse_counts = {}
         for t in tasks:
             adv = t.max_adverse_move_pct
-            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+            if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
                 range_key = get_adverse_range_ui(adv)
                 if range_key:
                     adverse_counts[range_key] = adverse_counts.get(range_key, 0) + 1
@@ -4999,7 +5012,7 @@ def render_signal_stats_table(tasks):
         adv_4_plus_total = 0
         for t in tasks:
             adv = t.max_adverse_move_pct
-            if t.reached_level and adv is not None and not (isinstance(adv, float) and pd.isna(adv)):
+            if t.reached_level and adv is not None and not (isinstance(adv, float) and is_na(adv)):
                 if adv >= 0.5:
                     adv_05_plus_total += 1
                 if adv >= 4.0:
@@ -5011,7 +5024,7 @@ def render_signal_stats_table(tasks):
         exp_4_plus_total = 0
         for t in tasks:
             exp = t.max_expected_move_pct
-            if t.reached_level and exp is not None and not (isinstance(exp, float) and pd.isna(exp)):
+            if t.reached_level and exp is not None and not (isinstance(exp, float) and is_na(exp)):
                 range_key = get_adverse_range_ui(exp)
                 if range_key:
                     exp_counts[range_key] = exp_counts.get(range_key, 0) + 1
@@ -5031,13 +5044,13 @@ def render_signal_stats_table(tasks):
         adv_sgnl_05 = 0; adv_sgnl_4 = 0; exp_sgnl_05 = 0; exp_sgnl_4 = 0
         for t in tasks:
             adv_s = t.max_adverse_sgnl_pct
-            if adv_s is not None and not (isinstance(adv_s, float) and pd.isna(adv_s)):
+            if adv_s is not None and not (isinstance(adv_s, float) and is_na(adv_s)):
                 r = get_adverse_range_ui(adv_s)
                 if r: adv_sgnl_counts[r] = adv_sgnl_counts.get(r, 0) + 1
                 if adv_s >= 0.5: adv_sgnl_05 += 1
                 if adv_s >= 4.0: adv_sgnl_4 += 1
             exp_s = t.max_expected_sgnl_pct
-            if exp_s is not None and not (isinstance(exp_s, float) and pd.isna(exp_s)):
+            if exp_s is not None and not (isinstance(exp_s, float) and is_na(exp_s)):
                 r = get_adverse_range_ui(exp_s)
                 if r: exp_sgnl_counts[r] = exp_sgnl_counts.get(r, 0) + 1
                 if exp_s >= 0.5: exp_sgnl_05 += 1
@@ -5054,7 +5067,7 @@ def render_signal_stats_table(tasks):
         delta_4_plus_total = 0
         for t in tasks:
             dp = t.price_change_pct
-            if dp is not None and not (isinstance(dp, float) and pd.isna(dp)):
+            if dp is not None and not (isinstance(dp, float) and is_na(dp)):
                 val = abs(dp)
                 r = get_adverse_range_ui(val)
                 if r:
