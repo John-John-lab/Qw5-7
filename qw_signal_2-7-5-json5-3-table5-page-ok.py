@@ -3037,8 +3037,6 @@ def render_tab(tab):
             ], style={"marginBottom": "20px"}),
             html.Hr(),
             html.Div(id="task-table-container", style={"width": "100%"}),
-            html.Hr(),
-            html.Div(id="summary-stats-container", style={"max-height": "400px", "overflow-y": "auto", "border": "1px solid #aaa", "padding": "10px"}),
         ])
     else:
         # Data Analysis tab - now imported from database module
