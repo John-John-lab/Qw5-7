@@ -2485,10 +2485,10 @@ document.addEventListener('click', function(e) {
     }
 });
 // Toggle column highlight on header click
-// Toggle row highlight on ANY cell click (not a button, not a header)
+// Toggle row highlight on ANY cell click (not a button, not a header, not an interactive-button DIV)
 document.addEventListener('click', function(e) {
-    // Ignore clicks inside buttons
-    if (e.target.closest('button')) return;
+    // Ignore clicks inside buttons OR interactive-button DIVs
+    if (e.target.closest('button') || e.target.closest('.interactive-button')) return;
     let cell = e.target.closest('th, td');
     if (!cell) return;
     let table = cell.closest('table');
@@ -4267,9 +4267,11 @@ def render_task_table_row(t):
     pause_bg = "#fff3cd" if t.paused else "#d1ecf1"
     pause_btn = f'<div data-action="pause" data-task-id="{task_id_str}" style="margin:2px;padding:4px 8px;background-color:{pause_bg};border-radius:3px;cursor:pointer;display:inline-block;font-size:11px" class="interactive-button">{pause_label}</div>'
     
-    chart_btn = f'<div data-action="chart" data-task-id="{task_id_str}" style="margin:2px;padding:4px 8px;background-color:#d4edda if is_completed else #e9ecef;border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:11px;opacity:{btn_opacity}" class="interactive-button">Chart</div>'
+    chart_bg = "#d4edda" if is_completed else "#e9ecef"
+    chart_btn = f'<div data-action="chart" data-task-id="{task_id_str}" style="margin:2px;padding:4px 8px;background-color:{chart_bg};border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:11px;opacity:{btn_opacity}" class="interactive-button">Chart</div>'
     
-    details_btn = f'<div data-action="details" data-task-id="{task_id_str}" style="margin:2px;padding:4px 8px;background-color:#d4edda if is_completed else #e9ecef;border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:11px;opacity:{btn_opacity}" class="interactive-button">Details</div>'
+    details_bg = "#d4edda" if is_completed else "#e9ecef"
+    details_btn = f'<div data-action="details" data-task-id="{task_id_str}" style="margin:2px;padding:4px 8px;background-color:{details_bg};border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:11px;opacity:{btn_opacity}" class="interactive-button">Details</div>'
     
     impulse_has_data = is_completed and impulse_count > 0
     impulse_bg = "#d4edda" if impulse_has_data else "#e9ecef"
@@ -4277,9 +4279,11 @@ def render_task_table_row(t):
     impulse_opac = "1" if impulse_has_data else "0.6"
     impulse_btn = f'<div data-action="impulse" data-task-id="{task_id_str}" style="margin:2px;padding:4px 8px;background-color:{impulse_bg};border-radius:3px;cursor:{impulse_cursor};display:inline-block;font-size:11px;opacity:{impulse_opac}" class="interactive-button">Impulse</div>'
     
-    rerun_strat_btn = f'<div data-action="rerun-strat" data-task-id="{task_id_str}" style="margin:2px;padding:3px 6px;background-color:#d4edda if is_completed else #e9ecef;border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:9px;opacity:{btn_opacity}" class="interactive-button">Re‑run Strategy</div>'
+    rerun_strat_bg = "#d4edda" if is_completed else "#e9ecef"
+    rerun_strat_btn = f'<div data-action="rerun-strat" data-task-id="{task_id_str}" style="margin:2px;padding:3px 6px;background-color:{rerun_strat_bg};border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:9px;opacity:{btn_opacity}" class="interactive-button">Re‑run Strategy</div>'
     
-    rerun_impulse_btn = f'<div data-action="rerun-impulse" data-task-id="{task_id_str}" style="margin:2px;padding:3px 6px;background-color:#d4edda if is_completed else #e9ecef;border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:9px;opacity:{btn_opacity}" class="interactive-button">Re‑run Impulse</div>'
+    rerun_impulse_bg = "#d4edda" if is_completed else "#e9ecef"
+    rerun_impulse_btn = f'<div data-action="rerun-impulse" data-task-id="{task_id_str}" style="margin:2px;padding:3px 6px;background-color:{rerun_impulse_bg};border-radius:3px;cursor:{btn_disabled};display:inline-block;font-size:9px;opacity:{btn_opacity}" class="interactive-button">Re‑run Impulse</div>'
     
     # TV Button
     symbol = t.symbols[0] if t.symbols else ""
