@@ -2453,12 +2453,16 @@ document.addEventListener('click', function(e) {
                 // For Chart/Details/Impulse actions: trigger Dash callback via hidden store
                 else {
                     // Set the appropriate hidden store to trigger Dash callback
+                    // Use CustomEvent to trigger Dash updates (Dash 4.x compatible)
                     if (actionType === 'chart') {
-                        window.dash_clientside.set_props('chart-button-trigger', { data: { task_id: taskId, action: actionType } });
+                        const event = new CustomEvent('dash-chart-trigger', { detail: { task_id: taskId, action: actionType } });
+                        document.dispatchEvent(event);
                     } else if (actionType === 'details') {
-                        window.dash_clientside.set_props('strategy-details-trigger', { data: { task_id: taskId } });
+                        const event = new CustomEvent('dash-details-trigger', { detail: { task_id: taskId } });
+                        document.dispatchEvent(event);
                     } else if (actionType === 'impulse') {
-                        window.dash_clientside.set_props('impulse-button-trigger', { data: { task_id: taskId, action: actionType } });
+                        const event = new CustomEvent('dash-impulse-trigger', { detail: { task_id: taskId, action: actionType } });
+                        document.dispatchEvent(event);
                     } else if (actionType === 'rerun-strat' || actionType === 'rerun-impulse') {
                         // Use fetch for rerun actions since they modify server state
                         fetch('/task-action', {
