@@ -2405,25 +2405,34 @@ function applyHiddenColumns() {
 // Existing button feedback (unchanged) - now supports both BUTTON and DIV elements
 document.addEventListener('click', function(e) {
     let target = e.target;
-    // Support both BUTTON and DIV elements with interactive-button class
-    if ((target.tagName === 'BUTTON' || (target.tagName === 'DIV' && target.classList.contains('interactive-button'))) && target.id) {
-        try {
-            // P1 IMPROVEMENT: Use data attributes instead of JSON parsing for better reliability
-            let actionType = target.getAttribute('data-action');
-            let taskId = target.getAttribute('data-task-id');
-            
-            // Fallback to old JSON parsing method for backward compatibility during transition
-            if (!actionType || !taskId) {
-                console.warn('Using legacy JSON ID parsing. Please update button generation.');
-                let idObj = JSON.parse(target.id);
-                if (idObj.type === 'pause-task' || idObj.type === 'stop-task' || idObj.type === 'save-log') {
-                    taskId = idObj.index;
-                    actionType = idObj.type === 'save-log' ? 'save' : (idObj.type === 'stop-task' ? 'stop' : 'pause');
-                }
+    
+    // Check if the clicked element is a button or contains a button
+    let button = null;
+    if (target.tagName === 'BUTTON' || target.closest('button')) {
+        button = target.tagName === 'BUTTON' ? target : target.closest('button');
+    } else if (target.tagName === 'DIV' && target.classList.contains('interactive-button')) {
+        button = target;
+    }
+    
+    if (!button) return;
+    
+    try {
+        // P1 IMPROVEMENT: Use data attributes instead of JSON parsing for better reliability
+        let actionType = button.getAttribute('data-action');
+        let taskId = button.getAttribute('data-task-id');
+        
+        // Fallback to old JSON parsing method for backward compatibility during transition
+        if (!actionType || !taskId) {
+            console.warn('Using legacy JSON ID parsing. Please update button generation.');
+            let idObj = JSON.parse(button.id);
+            if (idObj.type === 'pause-task' || idObj.type === 'stop-task' || idObj.type === 'save-log') {
+                taskId = idObj.index;
+                actionType = idObj.type === 'save-log' ? 'save' : (idObj.type === 'stop-task' ? 'stop' : 'pause');
             }
-            
-            // Process action if we have valid data
-            if (actionType && taskId) {
+        }
+        
+        // Process action if we have valid data
+        if (actionType && taskId) {
                 // For Stop/Pause actions: use direct fetch (fast, no page reload needed)
                 if (actionType === 'stop' || actionType === 'pause') {
                     fetch('/task-action', {
@@ -2471,7 +2480,7 @@ document.addEventListener('click', function(e) {
             }
         } catch (e) {
             // P1 CRITICAL: Log errors instead of silently swallowing them
-            console.error('Button click handler error:', e, 'Target ID:', target.id, 'Target:', target);
+            console.error('Button click handler error:', e, 'Target:', button);
         }
     }
 });
