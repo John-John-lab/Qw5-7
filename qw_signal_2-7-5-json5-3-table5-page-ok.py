@@ -2613,6 +2613,10 @@ app.layout = html.Div([
     dcc.Store(id="impulse-visible-store", data=True),
     dcc.Store(id="events-visible-store", data=True),
     dcc.Store(id="impulse-params-store", data={}),
+    # 🔧 CRITICAL: Hidden dummy inputs for CustomEvent-triggered callbacks
+    dcc.Input(id="chart-event-dummy", style={"display": "none"}),
+    dcc.Input(id="details-event-dummy", style={"display": "none"}),
+    dcc.Input(id="impulse-event-dummy", style={"display": "none"}),
     dcc.Tabs(id="main-tabs", value="tab-tasks", children=[
         dcc.Tab(label="Tasks", value="tab-tasks"),
         dcc.Tab(label="Data Analysis", value="tab-analysis"),
@@ -3484,13 +3488,77 @@ function(clickData) {
 clientside_callback(
     """
 function(n) {
-    // Listen to the custom event dispatched by JavaScript when chart button is clicked
-    // The event detail contains {task_id, action} which will be automatically passed to the store
+    // This callback is triggered by the custom event via the window event listener below
+    // The event detail is passed through the global window.dashChartEventData
+    if (window.dashChartEventData) {
+        return window.dashChartEventData;
+    }
     return window.dash_clientside.no_update;
 }
 """,
     Output("chart-button-trigger", "data"),
-    Input("chart-button-trigger", "data"),  # Self-listening to capture CustomEvent detail
+    Input("chart-event-dummy", "n_clicks"),  # Dummy input that gets incremented by event listener
+    prevent_initial_call=True
+)
+
+# 🔧 CRITICAL: Global event listeners for CustomEvents - these capture event details and update dummy counters
+app.index_string = app.index_string.replace(
+    '{%renderer%}',
+    '''{%renderer%}
+<script>
+// Global event listeners for CustomEvents dispatched by button clicks
+document.addEventListener('dash-chart-trigger', function(e) {
+    window.dashChartEventData = e.detail;
+    // Trigger a click on the hidden input to activate the clientside callback
+    const dummyInput = document.getElementById('chart-event-dummy');
+    if (dummyInput) dummyInput.click();
+});
+document.addEventListener('dash-details-trigger', function(e) {
+    window.dashDetailsEventData = e.detail;
+    const dummyInput = document.getElementById('details-event-dummy');
+    if (dummyInput) dummyInput.click();
+});
+document.addEventListener('dash-impulse-trigger', function(e) {
+    window.dashImpulseEventData = e.detail;
+    const dummyInput = document.getElementById('impulse-event-dummy');
+    if (dummyInput) dummyInput.click();
+});
+</script>'''
+)
+
+# 🔧 CRITICAL: Clientside callback to capture CustomEvent 'dash-details-trigger' and update strategy-details-trigger store
+# This enables the Details button to work
+clientside_callback(
+    """
+function(n) {
+    // This callback is triggered by the custom event via the window event listener
+    // The event detail is passed through the global window.dashDetailsEventData
+    if (window.dashDetailsEventData) {
+        return window.dashDetailsEventData;
+    }
+    return window.dash_clientside.no_update;
+}
+""",
+    Output("strategy-details-trigger", "data"),
+    Input("details-event-dummy", "n_clicks"),  # Dummy input that gets incremented by event listener
+    prevent_initial_call=True
+)
+
+# 🔧 CRITICAL: Clientside callback to capture CustomEvent 'dash-impulse-trigger' and update impulse-button-trigger store
+# This enables the Impulse button to work
+clientside_callback(
+    """
+function(n) {
+    // This callback is triggered by the custom event via the window event listener
+    // The event detail is passed through the global window.dashImpulseEventData
+    if (window.dashImpulseEventData) {
+        return window.dashImpulseEventData;
+    }
+    return window.dash_clientside.no_update;
+}
+""",
+    Output("impulse-button-trigger", "data"),
+    Input("impulse-event-dummy", "n_clicks"),  # Dummy input that gets incremented by event listener
     prevent_initial_call=True
 )
 
@@ -3758,7 +3826,8 @@ _cached_golden_version = None
     Input("task-page-store", "data"),
     Input("golden-store-version", "data"),
     Input("recalc-lock-store", "data"),
-    Input("analysis-complete-trigger", "data")  # 🔧 NEW: Trigger UI refresh after recalculation completes
+    Input("analysis-complete-trigger", "data"),  # 🔧 NEW: Trigger UI refresh after recalculation completes
+    prevent_initial_call=False
 )
 def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
