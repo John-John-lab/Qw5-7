@@ -2490,13 +2490,21 @@ document.addEventListener('click', function(e) {
 });
 // Toggle column highlight on header click
 // Toggle row highlight on ANY cell click (not a button, not a header, not an interactive-button DIV)
+// CRITICAL FIX: Must check if click originated from inside a table cell, not just any element
 document.addEventListener('click', function(e) {
-    // Ignore clicks inside buttons OR interactive-button DIVs
+    // CRITICAL: Check if we're clicking inside a TABLE first before checking for buttons
+    // This ensures table clicks are handled even if they contain interactive elements
+    let table = e.target.closest('table');
+    
+    // If we're NOT in a table, exit early (let button handler deal with it)
+    if (!table) return;
+    
+    // Ignore clicks inside buttons OR interactive-button DIVs within the table
     if (e.target.closest('button') || e.target.closest('.interactive-button')) return;
+    
     let cell = e.target.closest('th, td');
     if (!cell) return;
-    let table = cell.closest('table');
-    if (!table) return;
+    
     // Column header click: toggle yellow highlight on the whole column
     if (cell.tagName === 'TH') {
         let colIndex = cell.cellIndex;
@@ -2605,6 +2613,10 @@ app.layout = html.Div([
     dcc.Store(id="impulse-visible-store", data=True),
     dcc.Store(id="events-visible-store", data=True),
     dcc.Store(id="impulse-params-store", data={}),
+    # 🔧 CRITICAL: Hidden dummy buttons for CustomEvent-triggered callbacks (using html.Button which supports n_clicks)
+    html.Button(id="chart-event-dummy", style={"display": "none"}, n_clicks=0),
+    html.Button(id="details-event-dummy", style={"display": "none"}, n_clicks=0),
+    html.Button(id="impulse-event-dummy", style={"display": "none"}, n_clicks=0),
     dcc.Tabs(id="main-tabs", value="tab-tasks", children=[
         dcc.Tab(label="Tasks", value="tab-tasks"),
         dcc.Tab(label="Data Analysis", value="tab-analysis"),
@@ -3471,6 +3483,85 @@ function(clickData) {
     prevent_initial_call=False
 )
 
+# 🔧 CRITICAL: Clientside callback to capture CustomEvent 'dash-chart-trigger' and update chart-button-trigger store
+# This is the missing link that allows the chart button to work!
+clientside_callback(
+    """
+function(n) {
+    // This callback is triggered by the custom event via the window event listener below
+    // The event detail is passed through the global window.dashChartEventData
+    if (window.dashChartEventData) {
+        return window.dashChartEventData;
+    }
+    return window.dash_clientside.no_update;
+}
+""",
+    Output("chart-button-trigger", "data"),
+    Input("chart-event-dummy", "n_clicks"),  # Dummy button that gets incremented by event listener
+    prevent_initial_call=True
+)
+
+# 🔧 CRITICAL: Global event listeners for CustomEvents - these capture event details and update dummy counters
+app.index_string = app.index_string.replace(
+    '{%renderer%}',
+    '''{%renderer%}
+<script>
+// Global event listeners for CustomEvents dispatched by button clicks
+document.addEventListener('dash-chart-trigger', function(e) {
+    window.dashChartEventData = e.detail;
+    // Trigger a click on the hidden button to activate the clientside callback
+    const dummyBtn = document.getElementById('chart-event-dummy');
+    if (dummyBtn) dummyBtn.click();
+});
+document.addEventListener('dash-details-trigger', function(e) {
+    window.dashDetailsEventData = e.detail;
+    const dummyBtn = document.getElementById('details-event-dummy');
+    if (dummyBtn) dummyBtn.click();
+});
+document.addEventListener('dash-impulse-trigger', function(e) {
+    window.dashImpulseEventData = e.detail;
+    const dummyBtn = document.getElementById('impulse-event-dummy');
+    if (dummyBtn) dummyBtn.click();
+});
+</script>'''
+)
+
+# 🔧 CRITICAL: Clientside callback to capture CustomEvent 'dash-details-trigger' and update strategy-details-trigger store
+# This enables the Details button to work
+clientside_callback(
+    """
+function(n) {
+    // This callback is triggered by the custom event via the window event listener
+    // The event detail is passed through the global window.dashDetailsEventData
+    if (window.dashDetailsEventData) {
+        return window.dashDetailsEventData;
+    }
+    return window.dash_clientside.no_update;
+}
+""",
+    Output("strategy-details-trigger", "data"),
+    Input("details-event-dummy", "n_clicks"),  # Dummy button that gets incremented by event listener
+    prevent_initial_call=True
+)
+
+# 🔧 CRITICAL: Clientside callback to capture CustomEvent 'dash-impulse-trigger' and update impulse-button-trigger store
+# This enables the Impulse button to work
+clientside_callback(
+    """
+function(n) {
+    // This callback is triggered by the custom event via the window event listener
+    // The event detail is passed through the global window.dashImpulseEventData
+    if (window.dashImpulseEventData) {
+        return window.dashImpulseEventData;
+    }
+    return window.dash_clientside.no_update;
+}
+""",
+    Output("impulse-button-trigger", "data"),
+    Input("impulse-event-dummy", "n_clicks"),  # Dummy button that gets incremented by event listener
+    prevent_initial_call=True
+)
+
 @app.callback(
     Output({"type": "log", "index": ALL}, "value"),
     Output({"type": "progress", "index": ALL}, "value"),
@@ -3735,7 +3826,8 @@ _cached_golden_version = None
     Input("task-page-store", "data"),
     Input("golden-store-version", "data"),
     Input("recalc-lock-store", "data"),
-    Input("analysis-complete-trigger", "data")  # 🔧 NEW: Trigger UI refresh after recalculation completes
+    Input("analysis-complete-trigger", "data"),  # 🔧 NEW: Trigger UI refresh after recalculation completes
+    prevent_initial_call=False
 )
 def update_task_table_only(current_page, version, lock_state, analysis_trigger):
     """Render task table ONLY. Uses aggressive caching to skip HTML generation on page changes."""
