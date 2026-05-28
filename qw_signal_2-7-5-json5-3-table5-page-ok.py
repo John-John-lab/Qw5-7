@@ -2613,10 +2613,10 @@ app.layout = html.Div([
     dcc.Store(id="impulse-visible-store", data=True),
     dcc.Store(id="events-visible-store", data=True),
     dcc.Store(id="impulse-params-store", data={}),
-    # 🔧 CRITICAL: Hidden dummy inputs for CustomEvent-triggered callbacks
-    dcc.Input(id="chart-event-dummy", style={"display": "none"}),
-    dcc.Input(id="details-event-dummy", style={"display": "none"}),
-    dcc.Input(id="impulse-event-dummy", style={"display": "none"}),
+    # 🔧 CRITICAL: Hidden dummy buttons for CustomEvent-triggered callbacks (using html.Button which supports n_clicks)
+    html.Button(id="chart-event-dummy", style={"display": "none"}, n_clicks=0),
+    html.Button(id="details-event-dummy", style={"display": "none"}, n_clicks=0),
+    html.Button(id="impulse-event-dummy", style={"display": "none"}, n_clicks=0),
     dcc.Tabs(id="main-tabs", value="tab-tasks", children=[
         dcc.Tab(label="Tasks", value="tab-tasks"),
         dcc.Tab(label="Data Analysis", value="tab-analysis"),
@@ -3497,7 +3497,7 @@ function(n) {
 }
 """,
     Output("chart-button-trigger", "data"),
-    Input("chart-event-dummy", "n_clicks"),  # Dummy input that gets incremented by event listener
+    Input("chart-event-dummy", "n_clicks"),  # Dummy button that gets incremented by event listener
     prevent_initial_call=True
 )
 
@@ -3509,19 +3509,19 @@ app.index_string = app.index_string.replace(
 // Global event listeners for CustomEvents dispatched by button clicks
 document.addEventListener('dash-chart-trigger', function(e) {
     window.dashChartEventData = e.detail;
-    // Trigger a click on the hidden input to activate the clientside callback
-    const dummyInput = document.getElementById('chart-event-dummy');
-    if (dummyInput) dummyInput.click();
+    // Trigger a click on the hidden button to activate the clientside callback
+    const dummyBtn = document.getElementById('chart-event-dummy');
+    if (dummyBtn) dummyBtn.click();
 });
 document.addEventListener('dash-details-trigger', function(e) {
     window.dashDetailsEventData = e.detail;
-    const dummyInput = document.getElementById('details-event-dummy');
-    if (dummyInput) dummyInput.click();
+    const dummyBtn = document.getElementById('details-event-dummy');
+    if (dummyBtn) dummyBtn.click();
 });
 document.addEventListener('dash-impulse-trigger', function(e) {
     window.dashImpulseEventData = e.detail;
-    const dummyInput = document.getElementById('impulse-event-dummy');
-    if (dummyInput) dummyInput.click();
+    const dummyBtn = document.getElementById('impulse-event-dummy');
+    if (dummyBtn) dummyBtn.click();
 });
 </script>'''
 )
@@ -3540,7 +3540,7 @@ function(n) {
 }
 """,
     Output("strategy-details-trigger", "data"),
-    Input("details-event-dummy", "n_clicks"),  # Dummy input that gets incremented by event listener
+    Input("details-event-dummy", "n_clicks"),  # Dummy button that gets incremented by event listener
     prevent_initial_call=True
 )
 
@@ -3558,7 +3558,7 @@ function(n) {
 }
 """,
     Output("impulse-button-trigger", "data"),
-    Input("impulse-event-dummy", "n_clicks"),  # Dummy input that gets incremented by event listener
+    Input("impulse-event-dummy", "n_clicks"),  # Dummy button that gets incremented by event listener
     prevent_initial_call=True
 )
 
