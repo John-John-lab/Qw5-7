@@ -2490,13 +2490,21 @@ document.addEventListener('click', function(e) {
 });
 // Toggle column highlight on header click
 // Toggle row highlight on ANY cell click (not a button, not a header, not an interactive-button DIV)
+// CRITICAL FIX: Must check if click originated from inside a table cell, not just any element
 document.addEventListener('click', function(e) {
-    // Ignore clicks inside buttons OR interactive-button DIVs
+    // CRITICAL: Check if we're clicking inside a TABLE first before checking for buttons
+    // This ensures table clicks are handled even if they contain interactive elements
+    let table = e.target.closest('table');
+    
+    // If we're NOT in a table, exit early (let button handler deal with it)
+    if (!table) return;
+    
+    // Ignore clicks inside buttons OR interactive-button DIVs within the table
     if (e.target.closest('button') || e.target.closest('.interactive-button')) return;
+    
     let cell = e.target.closest('th, td');
     if (!cell) return;
-    let table = cell.closest('table');
-    if (!table) return;
+    
     // Column header click: toggle yellow highlight on the whole column
     if (cell.tagName === 'TH') {
         let colIndex = cell.cellIndex;
@@ -3469,6 +3477,21 @@ function(clickData) {
     Output("div-click-dummy-store", "data"),
     Input("div-click-trigger-store", "data"),
     prevent_initial_call=False
+)
+
+# 🔧 CRITICAL: Clientside callback to capture CustomEvent 'dash-chart-trigger' and update chart-button-trigger store
+# This is the missing link that allows the chart button to work!
+clientside_callback(
+    """
+function(n) {
+    // Listen to the custom event dispatched by JavaScript when chart button is clicked
+    // The event detail contains {task_id, action} which will be automatically passed to the store
+    return window.dash_clientside.no_update;
+}
+""",
+    Output("chart-button-trigger", "data"),
+    Input("chart-button-trigger", "data"),  # Self-listening to capture CustomEvent detail
+    prevent_initial_call=True
 )
 
 @app.callback(
